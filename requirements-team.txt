@@ -1,0 +1,4 @@
+# Starting evaluation dependencies verified locally on Python 3.12.3.
+# Final submission must also pin all transitive and additional dependencies.
+numpy==1.26.4
+pandas==2.1.4
