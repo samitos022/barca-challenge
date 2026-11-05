@@ -110,3 +110,9 @@ The implementation is original and deliberately simpler than these methods:
   https://arxiv.org/abs/2602.12080
 
 These papers' results are not directly comparable to the competition's spellF1.
+
+## Primo metodo del team
+
+La versione sperimentale con tracking, Smart Tagging e Viterbi è in
+`starter/temporal_possession.py`. I test sintetici funzionano senza
+il pacchetto dati; generare e valutare le nuove predizioni richiede il pacchetto.
