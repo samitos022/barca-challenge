@@ -72,3 +72,6 @@ artifacts/
 outputs/
 *.mkv
 *.mov
+
+# Diagnostics accompanying generated team predictions.
+evaluation/results/team_*.json

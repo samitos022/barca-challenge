@@ -86,3 +86,10 @@ Repository: https://github.com/metrica-sports/more-than-a-hack-2027
 Leggere nell'ordine: [CHALLENGE.md](CHALLENGE.md), [DATA.md](DATA.md), [EVALUATION.md](EVALUATION.md), [SUBMISSION.md](SUBMISSION.md), [RULES.md](RULES.md), [FAQ.md](FAQ.md), [OVERVIEW.md](OVERVIEW.md).
 
 Origine dell'importazione: archivio GitHub di `main`, prefisso commit `f8f2629`, scaricato il 4 novembre 2026. Licenza originale MIT conservata in LICENSE; non comprende i dati della partita.
+
+## Primo metodo del team
+
+La versione sperimentale con tracking, Smart Tagging e Viterbi è in
+`starter/temporal_possession.py`. Istruzioni, limiti e parametri sono descritti in
+[docs/TEMPORAL_METHOD.md](docs/TEMPORAL_METHOD.md). I test sintetici funzionano senza
+il pacchetto dati; generare e valutare le nuove predizioni richiede il pacchetto.
