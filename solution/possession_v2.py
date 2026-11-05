@@ -35,8 +35,11 @@ Entering the dead ball (H/A -> D)
      other, both within DUEL_BALL_R of the ball) or a pass received in an offside position (the
      receiver, at the moment of the pass, in the opponents' half and beyond both the ball and the
      second-last opponent by OFFSIDE_MARGIN), or the ball, untracked, comes back into view out of
-     the pitch at the end of the gap (it went out unseen). Otherwise it is refused: a player
-     holding the ball slowly, unchallenged, is not a stoppage, whatever the crowd is whistling.
+     the pitch at the end of the gap (it went out unseen). Without a cause the dead ball is not
+     refused, it costs NO_CAUSE_PENALTY points more: a player holding the ball slowly,
+     unchallenged, rarely gets that far, while a stoppage whose cause the tracking missed (the
+     contest happened in a crowd, the ball went out unseen) still gets there if every other
+     parameter says so.
      Ball gaps here are long (99.7% of the missing frames are in gaps of 5 s or more), so the ball
      cannot be interpolated across them; where it reappears is still known.
 
@@ -116,6 +119,7 @@ PARAMS.update({
     "D_MIN_S": 3.0,         # s: a dead ball from rules 2-4 shorter than this is cancelled ...
     # 7, a reason to stop
     "CAUSE_S": 3.0,         # s before the stoppage in which a contest or an offside is looked for
+    "NO_CAUSE_PENALTY": 0.25,  # points: without a cause the dead-ball threshold is 1.25, not 1
     "DUEL_R": 1.2,          # m between two opponents: a contest (tracking puts bodies ~0.5-1 m apart)
     "DUEL_BALL_R": 5.0,     # m from the ball (last seen within BALL_HOLD_S) for both of them
     "BALL_HOLD_S": 3.0,     # s a ball position is carried over a gap, for rule 7 only: the ball is
@@ -413,6 +417,7 @@ def decide(f, blocks, n, p):
     dtot = {k: np.zeros(n, dtype=np.float32) for k in D_KEYS}
     atot = {k: np.zeros(n, dtype=np.float32) for k in A_KEYS}
     d_reset = np.zeros(n, dtype=np.int8)  # why the dead-ball score went to 0 (RESET_* codes)
+    no_cause = np.zeros(n, dtype=bool)     # threshold reached but rule 7 found no cause yet
     a_reset = np.zeros(n, dtype=np.int8)
 
     for _, first, last in blocks:
@@ -557,20 +562,15 @@ def decide(f, blocks, n, p):
                 dtot[k][t] = v
             if sd >= thr_dead:
                 lo = max(first, sd_onset - cause_back)
-                if cause_cum[t + 1] - cause_cum[lo] == 0:
-                    # rule 7: no contest and no offside before it, so not a stoppage
-                    refused.append((t, sd_onset))
-                    sd = 0.0
-                    dt = [0.0] * len(D_KEYS)
-                    d_reset[t] = RESET_NO_CAUSE
-                    dead_score[t] = sd
-                    for k in D_KEYS:
-                        dtot[k][t] = 0.0
+                has_cause = cause_cum[t + 1] - cause_cum[lo] > 0
+                no_cause[t] = not has_cause
+                # rule 7: without a contest or an offside the stoppage needs NO_CAUSE_PENALTY more
+                if has_cause or sd >= thr_dead + p["NO_CAUSE_PENALTY"]:
+                    if not has_cause:
+                        refused.append((t, sd_onset))  # entered without a cause
+                    change(t, sd_onset, DEAD, "whistle" if sd_whistle else "players stopped")
                     state[t] = owner
                     continue
-                change(t, sd_onset, DEAD, "whistle" if sd_whistle else "players stopped")
-                state[t] = owner
-                continue
 
             # ---- possession change, as in v1 ----------------------------------------------
             for c in (HOME, AWAY):
@@ -614,7 +614,8 @@ def decide(f, blocks, n, p):
                 c_acc = acc[winner]
                 change(t, start, winner, "touch" if c_acc[1] >= c_acc[0] else "control")
             state[t] = owner
-    breakdown = {"ptot": ptot, "dtot": dtot, "atot": atot, "d_reset": d_reset, "a_reset": a_reset}
+    breakdown = {"ptot": ptot, "dtot": dtot, "atot": atot, "d_reset": d_reset, "a_reset": a_reset,
+                 "no_cause": no_cause}
     return state, live, score, dead_score, alive_score, changes, refused, breakdown
 
 
@@ -731,7 +732,8 @@ def main(source="tactical"):
         threshold=p["THRESHOLD"], threshold_dead=p["THRESHOLD_DEAD"], duel=duel, gap_out=gap_out,
         offsides=np.array(offs, dtype=np.int64).reshape(-1, 3),
         refused=np.array(refused, dtype=np.int64).reshape(-1, 2),
-        d_reset=bd["d_reset"], a_reset=bd["a_reset"],
+        d_reset=bd["d_reset"], a_reset=bd["a_reset"], no_cause=bd["no_cause"],
+        no_cause_penalty=p["NO_CAUSE_PENALTY"],
         **{"ptot_" + k: v for k, v in bd["ptot"].items()},
         **{"dtot_" + k: v for k, v in bd["dtot"].items()},
         **{"atot_" + k: v for k, v in bd["atot"].items()})
@@ -747,7 +749,7 @@ def main(source="tactical"):
     graded_duel = duel[graded].mean() if graded.any() else 0
     print("contest near the ball on {:.1f}% of graded frames; passes received offside: {}".format(
         100 * graded_duel, len(offs)))
-    print("dead balls refused for lack of a contest or offside: {}".format(len(refused)))
+    print("dead balls entered without a contest or offside (penalty paid): {}".format(len(refused)))
     from collections import Counter
     for half, first, last in blocks:
         mine = [c for c in changes if first <= c[0] <= last]

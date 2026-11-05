@@ -179,7 +179,7 @@ def main():
     dead_decided = np.array(sorted(dead_reason_at))
     reset_it = {v2.RESET_FAST: "palla veloce: il gioco è vivo",
                 v2.RESET_TOUCH: "tocco in campo: il gioco è vivo",
-                v2.RESET_NO_CAUSE: "soglia raggiunta ma nessun contrasto né fuorigioco: rifiutata",
+                v2.RESET_NO_CAUSE: "nessun contrasto né fuorigioco",
                 v2.RESET_OUT: "palla fuori: niente è vivo",
                 v2.RESET_KICKOFF: "prima del calcio d'inizio si riparte solo dal centro"}
 
@@ -297,12 +297,16 @@ def main():
             cause, ok = "contrasto vicino alla palla {:.1f} s fa".format(last_duel), True
         else:
             cause, ok = "nessun contrasto né fuorigioco", False
-        rows.append(("row", ("7 Causa (serve per 2-4)", cause, "sì" if ok else "no", ""),
-                     ACCENT if ok else DIM))
+        pen = 0.0 if ok else float(z["no_cause_penalty"])
+        rows.append(("row", ("7 Causa (se manca: −{:.2f})".format(float(z["no_cause_penalty"])), cause,
+                             "" if ok else pts(-pen), "" if ok else pts(-pen)),
+                     ACCENT if ok else TEXT))
         rr = recent(d_reset, f)
         if rr:
             rows.append(("text", "Azzerato: " + reset_it[rr], ACCENT))
-        rows.append(("row", ("", "", "somma", "= {:.2f}".format(sd)), TEXT))
+        rows.append(("row", ("", "", "somma", "= {:.2f}".format(sd - pen)), TEXT))
+        rows[0] = ("head", ("SOGLIA PALLA MORTA", "{:.2f} / {:.2f}".format(sd - pen, thr_dead),
+                            (sd - pen) / thr_dead), colour)
         return rows
 
     def restart_rows(f):
@@ -570,7 +574,7 @@ def main():
                 c.text((COL_TOT, y), value, font=font_bold, fill=col, anchor="ra")
                 bx0, bx1 = COL_TOT - 330, COL_TOT - 120
                 c.rectangle([bx0, y + 5, bx1, y + 17], outline=(90, 95, 105))
-                c.rectangle([bx0, y + 5, bx0 + int((bx1 - bx0) * min(1.0, frac)), y + 17], fill=col)
+                c.rectangle([bx0, y + 5, bx0 + int((bx1 - bx0) * min(1.0, max(0.0, frac))), y + 17], fill=col)
             elif kind == "cols":
                 c.text((INFO_X, y), cells[0], font=font_row, fill=DIM)
                 c.text((COL_VAL, y), cells[1], font=font_row, fill=DIM)

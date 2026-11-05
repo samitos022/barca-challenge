@@ -12,11 +12,12 @@ the broadcast, and no mapping table. Three independent signals are combined:
   2. Audio (fine).  Both videos carry the stadium sound. Band energies at 25 Hz are compared by
      normalised cross-correlation in windows of AUDIO_WIN_S around the clock offset, which pins it
      to the frame.
-  3. Tracking (confirmation, frame by frame).  On broadcast frames with a usable homography, the
+  3. Tracking (decision, frame by frame).  On broadcast frames with a usable homography, the
      broadcast players (pitch coordinates, same convention as the tactical ATD) are compared with
-     the tactical players at the synchronised frame: median distance of each broadcast player to
-     the closest tactical player of the same team. Under LIVE_COST metres the frame is LIVE.
-     Replays, close-ups and cuts fail this test and are not used.
+     the tactical players at each candidate offset: median distance of each broadcast player to
+     the closest tactical player of the same team. The candidate under LIVE_COST metres wins and
+     the frame is LIVE. A clock peak the tracking never confirms is dropped. Replays, close-ups and
+     cuts fail this test and are not used.
 
 Output, data/derived/<game>_broadcast_sync.npz:
     t_of_b  (n_broadcast,)  tactical frame shown by each broadcast frame at the stretch offset
@@ -65,6 +66,7 @@ P = {
     "TRACK_MIN_PLAYERS": 4,
     "TRACK_SEARCH": 12,     # frames searched each side when refining the offset by tracking
     "LIVE_COST": 1.5,       # m, median distance under which a broadcast frame is live
+    "NEAREST_S": 60.0,      # s: a non-live frame takes the offset of a live check this close
 }
 CLOCK = re.compile(r"^(\d{1,3})[:.](\d{2})$")
 
@@ -241,51 +243,67 @@ def refine_audio(seg, at, ab):
 
 
 # ---- 3. tracking ----------------------------------------------------------------------------------
-def tracking_check(segs, tac, brd, valid_h):
-    """Refine each stretch offset by tracking and flag live broadcast frames."""
+def tracking_assign(candidates, tac, brd, valid_h):
+    """Let the tracking pick, frame by frame, which candidate offset is right.
+
+    1. Each candidate is refined on a subsample of checks (+/- TRACK_SEARCH frames); a candidate the
+       tracking never confirms is dropped (a spurious clock peak dies here).
+    2. Every TRACK_EVERY-th broadcast frame with a usable homography and enough players is checked
+       against every surviving candidate (best of +/- 2 frames); the closest wins if it is under
+       LIVE_COST metres.
+    3. Frames between two checks confirmed with the same offset are live. Every other frame (replay,
+       close-up) takes the offset of the nearest confirmed check, within NEAREST_S, so that what the
+       broadcast is showing at that moment can still be displayed (flagged not live).
+    """
     t_teams, t_pl = tac
     b_teams, b_pl = brd
     n_b, n_t = len(b_pl), len(t_pl)
     s = P["TRACK_SEARCH"]
-    live = np.zeros(n_b, bool)
+    samples = [b for b in range(0, n_b, P["TRACK_EVERY"])
+               if valid_h[b] and np.sum(~np.isnan(b_pl[b, :, 0])) >= P["TRACK_MIN_PLAYERS"]]
+
+    def cost(b, t):
+        return _cost(b_pl[b], b_teams, t_pl[t], t_teams) if 0 <= t < n_t else np.inf
+
+    refined = []
+    for off in candidates:
+        shifts = []
+        for b in samples[::20]:
+            row = np.array([cost(b, b + off + dl) for dl in range(-s, s + 1)])
+            if row.min() <= P["LIVE_COST"]:
+                shifts.append(int(np.argmin(row)) - s)
+        if shifts:
+            refined.append((off + int(np.median(shifts)), len(shifts), off))
+    offs = [r[0] for r in refined]
+
+    label = np.full(n_b, -1, np.int64)
     cost_at = np.full(n_b, np.nan, np.float32)
-    for seg in segs:
-        b0, b1, off = seg
-        samples = []
-        for b in range(b0, b1 + 1, P["TRACK_EVERY"]):
-            if not valid_h[b]:
-                continue
-            ok = ~np.isnan(b_pl[b, :, 0])
-            if ok.sum() < P["TRACK_MIN_PLAYERS"]:
-                continue
-            samples.append(b)
-        deltas = []
-        costs = {}
-        for b in samples:
-            row = []
-            for dl in range(-s, s + 1):
-                t = b + off + dl
-                row.append(_cost(b_pl[b], b_teams, t_pl[t], t_teams) if 0 <= t < n_t else np.inf)
-            row = np.array(row)
-            costs[b] = row
-            if np.isfinite(row).any() and row.min() <= P["LIVE_COST"]:
-                deltas.append(int(np.argmin(row)) - s)
-        shift = int(np.median(deltas)) if deltas else 0
-        seg[2] = off + shift
-        for b, row in costs.items():
-            c = row[shift + s - 2:shift + s + 3]  # +/- 2 frames of slack around the final offset
-            c = c[np.isfinite(c)]
-            if len(c):
-                cost_at[b] = c.min()
-                live[b] = c.min() <= P["LIVE_COST"]
-    # fill the frames between checks: live if both neighbouring checks are live
-    idx = np.flatnonzero(np.isfinite(cost_at))
-    filled = np.zeros(n_b, bool)
-    for a, b in zip(idx[:-1], idx[1:]):
-        if b - a <= P["TRACK_EVERY"] * 2 and live[a] and live[b]:
-            filled[a:b + 1] = True
-    filled &= valid_h
-    return filled, cost_at
+    for b in samples:
+        best, best_k = np.inf, -1
+        for k, off in enumerate(offs):
+            c = min(cost(b, b + off + dl) for dl in range(-2, 3))
+            if c < best:
+                best, best_k = c, k
+        cost_at[b] = best
+        if best <= P["LIVE_COST"]:
+            label[b] = best_k
+
+    live = np.zeros(n_b, bool)
+    off_of_b = np.full(n_b, np.iinfo(np.int64).min, np.int64)
+    conf = np.array([b for b in samples if label[b] >= 0])
+    for a, b in zip(conf[:-1], conf[1:]):
+        if b - a <= 2 * P["TRACK_EVERY"] and label[a] == label[b]:
+            live[a:b + 1] = True
+    live &= valid_h
+    if len(conf):
+        frames = np.arange(n_b)
+        k = np.clip(np.searchsorted(conf, frames), 1, len(conf) - 1)
+        left, right = conf[k - 1], conf[k]
+        nearest = np.where(frames - left <= right - frames, left, right)
+        near_ok = np.abs(nearest - frames) <= int(P["NEAREST_S"] * FPS)
+        off_arr = np.array(offs, np.int64)
+        off_of_b[near_ok] = off_arr[label[nearest[near_ok]]]
+    return refined, live, off_of_b, cost_at
 
 
 def _cost(bp, bt, tp, tt):
@@ -330,30 +348,41 @@ def main():
     b_teams, b_pl, *_ = tracking.load(GAME, "broadcast")
     hcsv = asset_paths(GAME, source="broadcast")["homography"]
     valid_h = np.loadtxt(hcsv, delimiter=",", skiprows=1, usecols=(11,)) == 1
-    before = [s[2] for s in segs]
-    live, cost_at = tracking_check(segs, (t_teams, t_pl), (b_teams, b_pl), valid_h)
-    for seg, old in zip(segs, before):
-        n_seg = seg[1] - seg[0] + 1
-        print("   stretch b {}..{}: audio {:+d} -> tracking {:+d} frames; live {:.1f}% of its frames".format(
-            seg[0], seg[1], old, seg[2], 100 * live[seg[0]:seg[1] + 1].mean() if n_seg else 0))
+    candidates = sorted(set(seg[2] for seg in segs))
+    refined, live, off_of_b, cost_at = tracking_assign(candidates, (t_teams, t_pl), (b_teams, b_pl), valid_h)
+    dropped = set(candidates) - set(r[2] for r in refined)
+    for off, n_conf, old in refined:
+        print("   offset {:+d} -> tracking {:+d} frames ({:+.2f} s): confirmed on {} of the refining checks, "
+              "live on {:.1f}% of broadcast frames".format(old, off, off / FPS, n_conf,
+                                                           100 * np.mean(live & (off_of_b == off))))
+    for off in sorted(dropped):
+        print("   offset {:+d}: never confirmed by the tracking, dropped".format(off))
     checked = np.isfinite(cost_at)
     print("   tracking distance on checked frames: median {:.2f} m (live) vs {:.2f} m (not live)".format(
         np.median(cost_at[checked & live]) if (checked & live).any() else np.nan,
         np.median(cost_at[checked & ~live]) if (checked & ~live).any() else np.nan))
 
+    has = off_of_b != np.iinfo(np.int64).min
     t_of_b = np.full(n_b, -1, np.int64)
-    for b0, b1, off in segs:
-        t = np.arange(b0, b1 + 1) + off
-        ok = (t >= 0) & (t < n_t)
-        t_of_b[b0:b1 + 1][ok] = t[ok]
+    t_of_b[has] = np.arange(n_b)[has] + off_of_b[has]
+    t_of_b[(t_of_b < 0) | (t_of_b >= n_t)] = -1
+    live &= t_of_b >= 0
     b_of_t = np.full(n_t, -1, np.int64)
     b_live = np.full(n_t, -1, np.int64)
-    has = t_of_b >= 0
-    b_of_t[t_of_b[has]] = np.flatnonzero(has)
-    lv = has & live
-    b_live[t_of_b[lv]] = np.flatnonzero(lv)
+    ok = t_of_b >= 0
+    b_of_t[t_of_b[ok]] = np.flatnonzero(ok)
+    b_live[t_of_b[live]] = np.flatnonzero(live)
+    # stretches of constant offset, for the record
+    segs_out, start = [], None
+    for b in range(n_b + 1):
+        cur = off_of_b[b] if b < n_b else None
+        if start is None or b == n_b or cur != off_of_b[start]:
+            if start is not None and off_of_b[start] != np.iinfo(np.int64).min:
+                segs_out.append((start, b - 1, int(off_of_b[start])))
+            start = b
     np.savez(OUT, t_of_b=t_of_b, live=live, b_of_t=b_of_t, b_live=b_live,
-             segments=np.array(segs, np.int64), cost=cost_at)
+             segments=np.array(segs_out, np.int64).reshape(-1, 3), cost=cost_at)
+    print("   {} stretches of constant offset".format(len(segs_out)))
     print("broadcast frames live: {:.1f}%; tactical frames with a live broadcast frame: {:.1f}%".format(
         100 * live.mean(), 100 * (b_live >= 0).mean()))
     print("-> {}".format(os.path.relpath(OUT, ROOT)))

@@ -3,9 +3,10 @@
 On every tactical frame with a LIVE broadcast frame synchronised to it:
   - players: each team's tactical and broadcast players are paired greedily by distance (closest
     pair first, at most MATCH_R apart). A pair becomes one player at the weighted mean
-    (W_TACTICAL / 1 - W_TACTICAL, 50/50 by default). A tactical player with no partner stays as
-    he is; a broadcast player with no partner (the tactical tracker missed him) is added in an
-    extra slot, after the 46 tactical ones.
+    (W_TACTICAL / 1 - W_TACTICAL, 75/25 by default). A tactical player with no partner stays as
+    he is; a broadcast player with no partner is added in an extra slot, after the 46 tactical
+    ones, only if he is farther than GHOST_R from every tactical player of either team: closer
+    than that he is almost always a double of a player the tactical camera already tracks.
   - ball: seen by both, the weighted mean; seen by one, that one; seen by none, missing.
 Elsewhere (replays, close-ups, cuts, halftime) the tactical tracking is kept unchanged.
 
@@ -29,8 +30,12 @@ import tracking  # noqa: E402
 import sync_broadcast  # noqa: E402
 
 OUT = os.path.join(ROOT, "data", "derived", "{}_fused_tracking.npz".format(GAME))
-W_TACTICAL = 0.5     # weight of the tactical position in a pair (broadcast gets the rest)
+W_TACTICAL = 0.75    # weight of the tactical position in a pair (broadcast gets the rest): the
+                     # tactical camera is the reference; the broadcast nudges it and fills its gaps
 MATCH_R = 3.0        # m: farther apart than this, two tracks are not the same player
+GHOST_R = 3.0        # m: a broadcast-only player this close to ANY tactical player is a ghost
+                     # double (a tactical player the pairing missed, or on the other team's
+                     # side of a mix-up) and is not added
 
 BALL_NONE, BALL_TACTICAL, BALL_BROADCAST, BALL_BOTH = 0, 1, 2, 3
 
@@ -73,8 +78,10 @@ def main():
     ball_gap = np.full(n, np.nan, np.float32)  # distance between the two balls when both are seen
 
     w = W_TACTICAL
+    ghosts = np.zeros(n, np.int16)
     for t in np.flatnonzero(b_live >= 0):
         b = b_live[t]
+        t_all = t_pl[t][~np.isnan(t_pl[t, :, 0])]
         for team in (0, 1):
             ti = np.flatnonzero((t_teams == team) & ~np.isnan(t_pl[t, :, 0]))
             bi = np.flatnonzero((b_teams == team) & ~np.isnan(b_pl[b, :, 0]))
@@ -84,10 +91,15 @@ def main():
                 players[t, ti[i]] = w * t_pl[t, ti[i]] + (1 - w) * b_pl[b, bi[j]]
                 got.add(j)
             for j in range(len(bi)):
-                if j not in got:
-                    players[t, nt + bi[j]] = b_pl[b, bi[j]]
+                if j in got:
+                    continue
+                q = b_pl[b, bi[j]]
+                if len(t_all) and np.min(np.linalg.norm(t_all - q, axis=1)) <= GHOST_R:
+                    ghosts[t] += 1
+                    continue
+                players[t, nt + bi[j]] = q
+                added[t] += 1
             paired[t] += len(pairs)
-            added[t] += len(bi) - len(got)
         bv = not np.isnan(b_ball[b, 0])
         if bv and t_vis[t]:
             ball_gap[t] = np.linalg.norm(t_ball[t] - b_ball[b])
@@ -117,8 +129,8 @@ def main():
         print("where both see the ball, they are {:.2f} m apart (median), {:.2f} m (p90)".format(
             np.median(ball_gap[both]), np.percentile(ball_gap[both], 90)))
     lg = g & live
-    print("on live frames: {:.1f} player pairs merged, {:.1f} broadcast-only players added (mean per frame)".format(
-        paired[lg].mean(), added[lg].mean()))
+    print("on live frames: {:.1f} player pairs merged, {:.2f} broadcast-only players added, {:.2f} ghost "
+          "doubles dropped (mean per frame)".format(paired[lg].mean(), added[lg].mean(), ghosts[lg].mean()))
     print("-> {}".format(os.path.relpath(OUT, ROOT)))
 
 
