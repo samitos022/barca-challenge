@@ -1,194 +1,195 @@
-# More than a Hack 2027 — Phase 1: Ball Possession
+# Possesso palla frame per frame — More than a Hack 2027
 
-**Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)
-and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the Talent Arena in Barcelona.
+Per ogni frame della partita BAR-ATH (199.319 frame, 25 fps) il nostro codice dice **chi ha la
+palla**:
 
-A football data challenge on real professional match data, open to analysts, data scientists and
-engineers. You are given one complete LaLiga match — two camera feeds, automatic tracking of every
-player and the ball, automatic tactical tagging, and the camera-to-pitch geometry — and one
-question to answer with it.
-
----
-
-## The task
-
-**For every frame of the match, say who has the ball.**
-
-```
-frame,label
-11185,A        away in possession, ball alive
-11186,A
-...
-18240,D        dead ball
-...
-18684,H        home in possession, ball alive
-```
-
-That is the whole task. One CSV, one row per video frame, 199,319 rows. It is scored automatically
-against a private frame-by-frame ground truth, so there is a number at the end and no argument
-about it — no jury, and no presentation to argue from.
-
-The tracking is automatic and uncorrected: it has gaps and identity
-switches, and the ball itself is invisible on 41% of the frames you are scored on.
-
----
-
-## The challenge in one screen
-
-| |                                                                                                                           |
-|---|---------------------------------------------------------------------------------------------------------------------------|
-| **Input** | one full match: tactical video, broadcast video, automatic tracking **with the ball** for both, Smart Tagging, homography |
-| **Output** | `frame,label` CSV, 199,319 rows, labels `H` / `A` / `D` / `X`                                                             |
-| **Ranked on** | `spellF1` — how many of the match's real possessions you recovered as whole possessions                                   |
-| **Also reported** | `macroF1` — the per-frame view, and the first tie-break                                                                   |
-| **Baseline to beat** | `spellF1` **0.2433**, in this repository                                                                                  |
-| **Ground truth you get** | the first **5 minutes** of play — to check your pipeline, not to train on                                              |
-| **Ground truth you are scored on** | the full match, **private**                                                                                               |
-
-It is deliberately **not** a tracking challenge. The tracking, tagging and homography are given to
-you so that nobody has to rebuild detection, re-identification and camera calibration before
-getting to the actual question. See [CHALLENGE.md](CHALLENGE.md).
-
----
-
-## Try it right now
-
-The scorer, a 5-minute ground truth and four working baselines are in this repository. No
-enrolment, no download, no data:
-
-```bash
-pip install -r requirements.txt
-python evaluation/run_evaluation.py
-```
-
-Scored on the public 5 minutes, not on the full match -- which is why the order below is not the
-order of the floor quoted above:
-
-```
-scoreboard  gt/BAR-ATH_possession_gt_public.csv  199319 frames  7500 graded  21 gt segments
-ground truth has 17 possessions of mean 14.2 s  <- compare the poss and dur columns
-
-rank  submission                macroF1  spellF1   poss     dur  
-----  ------------------------  -------  -------  -----  ------  
-   1  baseline_smooth125         0.5812   0.4242     16    18.5  
-   2  baseline_smooth50          0.6207   0.3256     26    10.8  
-   3  baseline_smooth25          0.6200   0.2868     36     7.6  
-   4  baseline_raw               0.5972   0.0378    131     2.0  
-```
-
-Those four are **the same algorithm four times** — nearest tracked player to the ball, then a
-majority vote over a window. Only the window changes. `macroF1` barely moves; `spellF1` moves by a
-factor of eleven. That disagreement is the whole point of the metric, and
-[EVALUATION.md](EVALUATION.md) explains it.
-
-Once you have the data, regenerate them yourself and go further:
-
-```bash
-python starter/baseline.py                              # rebuild the four baselines
-python evaluation/validate_submission.py <your>.csv     # before every submission
-```
-
-**Validate every file before you submit it.** `validate_submission.py` runs exactly the checks the
-official scorer runs, and a file that fails them is dropped from the board with a one-line reason.
-It takes two seconds and it is the single most common way a good entry scores nothing.
-
----
-
-## Getting the data
-
-The match assets are released to enrolled participants who have accepted the terms of use.
-
-1. Enrol: **[More than A Hack 2027](https://landing.mobileworldcapital.com/more-than-a-hack-2027)**
-2. Read and sign the terms and conditions in the registration form
-3. You receive a download link.
-4. Unpack it into `./data`, or point `MTAH_DATA_DIR` at wherever you put it.
-
-Full description of every asset and how the frames line up: **[DATA.md](DATA.md)**.
-
----
-
-## Read these, in this order
-
-| | |
+| Etichetta | Significato |
 |---|---|
-| **[CHALLENGE.md](CHALLENGE.md)** | the problem, the four labels, what counts as possession |
-| **[DATA.md](DATA.md)** | every provided asset, its format, and the frame alignment |
-| **[EVALUATION.md](EVALUATION.md)** | how you are scored, and why — read before optimising anything |
-| **[SUBMISSION.md](SUBMISSION.md)** | the file contract, the three deliverables, how to submit |
-| **[RULES.md](RULES.md)** | what you may and may not do |
-| **[FAQ.md](FAQ.md)** | |
-| **[OVERVIEW.md](OVERVIEW.md)** | the competition as a whole — context, why the 2027 format changed, the calendar |
+| `H` | possesso della squadra di casa (Barcelona) |
+| `A` | possesso della squadra ospite (Athletic Club) |
+| `D` | palla morta (gioco fermo) |
+| `X` | nessuna risposta (fuori dai tempi di gioco) |
 
+La classifica usa lo **spellF1**: conta quanti possessi interi riconosciamo, non quanti frame
+indoviniamo. Contano molto la tempistica dei cambi (1 s di ritardo pesa) e il numero di possessi.
+Regole, dati e metrica ufficiali: [CHALLENGE.md](CHALLENGE.md), [RULES.md](RULES.md),
+[DATA.md](DATA.md), [EVALUATION.md](EVALUATION.md).
 
 ---
 
-## What is in this repository
+## Avvio rapido
 
-```
-games.py                    per-match constants, asset paths and the frame alignment
-evaluation/
-  possession_metrics.py     the metric library — every number on the board is defined here
-  run_evaluation.py         the scorer. This exact file produces the official result
-  validate_submission.py    check a file before you send it
-  gt/                       the public 5-minute ground truth
-  results/                  the four baselines; put your submissions here
-starter/
-  baseline.py               the reference baseline, numpy only
-  load_atd.py               read the tracking and line it up with video frames
-  load_smart_tagging.py     read the tactical tagging as video-frame intervals
-  load_homography.py        read the homography; project pitch <-> pixels
-  utils.py                  pitch plotting for the notebooks
-  01_smart_tagging.ipynb    guided tour of the tactical tagging
-  02_tracking_atd.ipynb     guided tour of the tracking data, with plots
-  03_first_submission.ipynb data in, scored submission out — start here
-data/                       unpack the downloaded match assets here. Empty in a fresh clone
+```bash
+# predizione (scrive evaluation/results/v2_possession*.csv)
+.venv/bin/python solution/possession_v2.py --no-whistle   # basta il tracking (ATD)
+.venv/bin/python solution/possession_v2.py                # + fischio: serve il video tattico
+.venv/bin/python solution/possession_v2.py --tracking fused   # + broadcast (vedi sotto)
+.venv/bin/python solution/possession_v2.py --fix-teams    # + correzione squadre (sperimentale)
+
+# punteggio sui 5 minuti pubblici (solo per controllare che il file sia giusto)
+.venv/bin/python evaluation/run_evaluation.py
+
+# calibrazione su partite esterne (prima volta: scarica i dati)
+.venv/bin/python solution/external/metrica.py --download
+.venv/bin/python solution/calibrate.py baseline
 ```
 
-The scorer you run locally is the scorer that decides the competition. If it scores on your
-machine, it scores the same way on ours.
+I dati della partita vanno in `data/tactical/` (non sono in git). Le cache e i file derivati
+finiscono in `data/derived/`.
 
 ---
 
-## Requirements
+## Cosa fa ogni file
 
-**Python 3.8 or newer.** The evaluation needs `numpy` and `pandas` and nothing else; it is tested
-under 3.8 and 3.11 and produces identical output under both. `starter/baseline.py` needs nothing
-more either — you can reach a scored submission without installing anything else.
-
-The notebooks additionally want `kloppy` and `matplotlib` (`requirements-starter.txt`), and
-**Python 3.9+ is recommended for those**: on Windows, installing Jupyter under 3.8 hits a
-`pywinpty` build failure that has nothing to do with this repository.
-
----
-
-## Timeline
-
-| |                |
-|---|----------------|
-| registration opens | **October 1, 2026** |
-| data released | **October 20, 2026** |
-| submission deadline | **November 17, 2026** |
-| results announced | **Before November 26, 2026**      |
-
----
-
-## Questions
-
-Open an issue for anything about the data, the metrics or the documentation — corrections are
-genuinely useful, and a fix that helps you helps everyone equally. For enrolment and the terms of
-use: **hackathon.talentarena@mobileworldcapital.com**.
-
-## Licence and citation
-
-The code and documentation in this repository are released under the MIT Licence — see
-[LICENSE](LICENSE). **The match data is not covered by it**: it is separately licensed for this
-competition only, under the terms you accept at enrolment.
-
-```bibtex
-@misc{mtah2027,
-  title  = {More than a Hack 2027: Phase 1 - Ball Possession},
-  author = {Metrica Sports and FC Barcelona Innovation Hub},
-  year   = {2027},
-  url    = {https://github.com/metrica-sports/more-than-a-hack-2027}
-}
 ```
+solution/
+  possession_v2.py      ← IL METODO: tracking → etichette H/A/D per ogni frame
+  possession_v1.py      ← feature di base (palla, distanze, tocchi) usate da v2
+  tracking.py           ← legge l'ATD e lo converte in metri (con cache)
+  clean_tracking.py     ← sposta i tracklet finiti nella squadra sbagliata (--fix-teams)
+  whistle.py            ← cerca toni da fischietto nell'audio del video tattico
+  sync_broadcast.py     ← allinea il video broadcast a quello tattico (orologio, audio, tracking)
+  ocr_vision.swift      ← OCR dell'orologio usato da sync_broadcast.py (macOS)
+  fusion.py             ← unisce tracking tattico e broadcast (75% / 25%)
+  calibrate.py          ← misura v2 sulle partite esterne: baseline, ablate, sweep, tracking
+  restart_timing.py     ← di quanto sbagliamo le riprese, per tipo (rimessa, punizione, ...)
+  external/
+    metrica.py          ← partite di esempio Metrica: tracking + etichette dagli eventi
+    degrade.py          ← sporca i giocatori delle partite esterne come quelli di BAR-ATH
+viz/                    ← video di revisione con i punteggi frame per frame (solo uso locale)
+starter/                ← codice fornito dagli organizzatori (+ temporal_possession.py, nostro
+                          primo esperimento con Viterbi, superato da v2)
+evaluation/             ← scorer ufficiale e 5 minuti di ground truth pubblica
+```
+
+Il cuore è `possession_v2.predict()`: riceve gli array del tracking e restituisce le etichette,
+senza leggere file. Lo stesso codice gira su BAR-ATH e sulle partite esterne.
+
+---
+
+## Come funziona `possession_v2`
+
+### L'idea
+
+Una **macchina a tre stati** (H, A, D) che scorre i frame uno alla volta. Ogni possibile cambio
+di stato ha un suo **punteggio**, che sale con le evidenze. Quando un punteggio supera la soglia
+lo stato cambia, e il cambio viene **datato all'inizio dell'evidenza**, non al frame in cui
+diventiamo sicuri. Tutte le soglie sono grandezze fisiche (metri, m/s, secondi) e si trovano in
+`PARAMS`, in cima al file.
+
+```
+            tocco / controllo della squadra avversaria
+     H  ◄──────────────────────────────────────────►  A
+      \                                              /
+       \  palla fuori · giocatori fermi · buco lungo /
+        ▼                                          ▼
+                             D
+              ripresa: primo tocco, palla che ricompare
+```
+
+### 1. Cambio di possesso (H ↔ A)
+
+La squadra **senza** palla accumula punti; quando arriva a 1 prende il possesso.
+
+| Evidenza | Quando | Punti |
+|---|---|---|
+| Controllo | un suo giocatore è il più vicino alla palla (entro 1–2,5 m), almeno 1 m più vicino dell'avversario, e la palla è lenta (sotto 4 m/s) | 2 al secondo |
+| Tocco | la velocità della palla cambia di colpo (oltre 3,5 m/s) vicino a un suo giocatore | 0,5 |
+| Verifica a 2 s | dopo il tocco: la squadra tiene davvero la palla? | ±0,5 |
+
+- Con palla veloce (oltre 8 m/s, passaggio o tiro) il controllo non conta: solo un tocco può rubarla.
+- La squadra in possesso, con i propri controlli e tocchi, toglie punti all'altra.
+- Senza nuove evidenze i punti si dimezzano ogni secondo.
+
+### 2. Palla morta (H/A → D)
+
+| Regola | Quando |
+|---|---|
+| **Palla fuori** | la palla supera una linea di oltre 1 m: palla morta subito, datata al passaggio della linea |
+| **Buco lungo** (regola 8) | palla non tracciata per almeno 5 s **e** giocatori che camminano (velocità media sotto 1,55 m/s): palla morta dal primo frame mancante |
+| **Giocatori fermi** | combinazione di due segnali: i 4 giocatori più vicini sono lontani dalla palla (oltre 7–12 m) e i giocatori frenano di colpo (velocità dimezzata rispetto ai 4 s prima) |
+| Fischio | aggiunge punti solo se poi i giocatori frenano (il pubblico fischia spesso) |
+
+La regola 8 è quella che conta di più. Nel tracking di Metrica la palla manca quasi sempre
+proprio a gioco fermo. Su BAR-ATH lo si vede senza etichette: nei buchi lunghi (41% dei frame) i
+giocatori vanno a 1,0 m/s, contro 1,9 m/s quando la palla è visibile.
+
+### 3. Ripresa del gioco (D → H/A)
+
+- **Palla che ricompare** dopo un buco lungo, in campo o appena fuori (rimesse): il gioco riparte
+  in quel frame, e la palla va alla squadra del giocatore più vicino.
+- **Primo tocco** in campo dopo almeno 1 s di palla ferma: la palla va alla squadra di chi tocca.
+- **Gioco di nuovo vivo** (palla in campo, giocatori che corrono) se il tocco non si vede.
+- Il primo avvio di ogni tempo vale solo dal centro del campo (calcio d'inizio).
+
+### Opzioni
+
+- `--fix-teams`: su BAR-ATH una squadra ha 12 giocatori nel 6% dei frame, quasi sempre perché un
+  giocatore dell'altra squadra è finito nella sua. `clean_tracking.py` sposta il tracklet il cui
+  cambio di squadra porta entrambe più vicino a 11. Dimezza le violazioni, ma il guadagno
+  misurato (+0.007) è sotto il rumore, quindi è spento di default.
+- `--tracking fused`: usa anche il broadcast. Prima vanno lanciati `sync_broadcast.py` e
+  `fusion.py`; servono i video.
+- Regola del calcio d'angolo: esiste ma è spenta (`CORNER_RULE = 0`), perché con la regola 8
+  faceva ripartire il gioco prima che la palla ricomparisse.
+
+---
+
+## Come calibriamo (senza overfittare)
+
+I 5 minuti pubblici **non** si usano per scegliere parametri ([RULES.md](RULES.md)): servono solo
+a controllare che il file sia corretto. Calibriamo invece su **altre partite**, come le regole
+permettono.
+
+1. **Dati esterni.** Le 3 partite di esempio di Metrica Sports, lo stesso fornitore del nostro
+   tracking (`external/metrica.py`). Le etichette H/A/D si ricavano dagli eventi: palla morta
+   dall'interruzione (fuori, fallo, fuorigioco, gol) alla ripresa. Un recupero conta come cambio
+   di possesso solo se la squadra poi gioca la palla, cioè un possesso *controllato*.
+2. **Stesso livello di sporcizia.** La palla manca già come da noi (59–68% visibile contro 59%). I
+   giocatori Metrica invece sono perfetti: `external/degrade.py` li sporca finché il numero di
+   giocatori per squadra ha lo stesso istogramma di BAR-ATH (11 nel 58%, 10 nel 22%, 12+ nel 6%).
+   Ogni partita viene sporcata 2 volte: 6 run in tutto.
+3. **Regola di decisione.** Si tiene una modifica solo se migliora quasi tutte le 6 run. Sotto
+   ~0.02 di spellF1 è rumore.
+
+```bash
+.venv/bin/python solution/calibrate.py baseline   # parametri attuali
+.venv/bin/python solution/calibrate.py ablate     # ogni regola spenta, una alla volta
+.venv/bin/python solution/calibrate.py sweep      # ogni parametro ×0.5 ×0.75 ×1.33 ×2
+.venv/bin/python solution/calibrate.py tracking   # giocatori puliti / sporchi / corretti
+.venv/bin/python solution/restart_timing.py       # ritardo delle riprese per tipo
+```
+
+---
+
+## Risultati
+
+**Partite esterne** (spellF1 medio su 6 run):
+
+| Versione | spellF1 |
+|---|---|
+| v2 di partenza | 0.550 |
+| + regola 8 (buco lungo) | 0.659 |
+| + angoli spenti (**attuale**) | **0.671** |
+
+Quanto vale ogni regola (se la tolgo): tocchi −0.041, verifica a 2 s −0.035, frenata −0.022.
+Sono neutre (±0.005) la regola della causa, la distanza dei giocatori e la durata minima della
+palla morta.
+
+**Attenzione.** Su Metrica i buchi della palla coincidono al frame con la palla morta. Su BAR-ATH
+il segnale c'è, ma è più debole: alla ricomparsa la palla è in posizione da calcio piazzato il 39%
+delle volte, contro il 64–74% su Metrica. Il guadagno reale della regola 8 sarà quindi
+probabilmente minore di +0.11.
+
+**5 minuti pubblici** (solo controllo, versione *prima* della regola 8): v2 senza fischio 0.545,
+miglior baseline ufficiale 0.424.
+
+---
+
+## Cosa manca
+
+- Valutare v2 con fischio e con tracking `fused` (servono i video).
+- Usare il replay del broadcast come segnale di palla morta.
+- Smart Tagging: le finestre dei tag (~35 s) sono troppo larghe per datare le riprese; va capito
+  dove cade la ripresa dentro la finestra prima di usarli per scegliere la squadra.
+- Report tecnico: [docs/TECHNICAL_REPORT_TEMPLATE.md](docs/TECHNICAL_REPORT_TEMPLATE.md).

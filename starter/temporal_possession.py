@@ -1,7 +1,7 @@
 """Experimental tracking + Smart Tagging + Viterbi possession estimator.
 
 No ground truth or baseline prediction files are read. Defaults are engineering
-hypotheses, not fitted parameters. See docs/TEMPORAL_METHOD.md for limitations.
+hypotheses, not fitted parameters. Superseded by solution/possession_v2.py (see README.md).
 """
 import argparse
 from dataclasses import asdict, dataclass

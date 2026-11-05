@@ -49,7 +49,10 @@ PARAMS = {
 
 
 def _decode(game):
-    cmd = ["ffmpeg", "-v", "error", "-i", video_path(game), "-vn", "-ac", "1", "-ar", str(SR),
+    if not os.path.exists(video_path(game)):
+        raise FileNotFoundError("{} missing: the whistle needs the tactical video's audio "
+                                "(or run possession_v2.py --no-whistle)".format(video_path(game)))
+    cmd =["ffmpeg", "-v", "error", "-i", video_path(game), "-vn", "-ac", "1", "-ar", str(SR),
            "-f", "s16le", "-"]
     raw = subprocess.run(cmd, stdout=subprocess.PIPE, check=True).stdout
     return np.frombuffer(raw, dtype=np.int16)
