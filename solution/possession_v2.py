@@ -43,15 +43,28 @@ Entering the dead ball (H/A -> D)
      Ball gaps here are long (99.7% of the missing frames are in gaps of 5 s or more), so the ball
      cannot be interpolated across them; where it reappears is still known.
 
-  8. Long gap, players walking.  The ball untracked for GAP_DEAD_S or more while the players'
-     mean speed over the gap is under (SPD_PLAY + SPD_DEAD) / 2 (no new threshold): dead from the
-     first missing frame; play resumes when the ball is seen again on the pitch (or just outside a
+  8. Long gap, players walking, SUPPORTED.  The ball untracked for GAP_DEAD_S or more while the
+     players' mean speed over the gap is under (SPD_PLAY + SPD_DEAD) / 2 (no new threshold). A gap
+     alone is weak evidence (the ball is also lost in crowds), so it makes a dead ball only with at
+     least one other signal: the ball last seen near or beyond a line, or seen again beyond a line
+     or at a set-piece spot (goal area, centre spot); the players braking or the players far from
+     the ball when it was lost; a whistle. Then dead from the first missing frame; play resumes when the ball is seen again on the pitch (or just outside a
      line), dated to that frame, and goes to the team closest to it. Measured, without labels:
      BAR-ATH's long gaps cover 41% of the graded frames with the players at 1.0 m/s against 1.9
      m/s while the ball is seen, and the ball reappears at a set-piece spot (touchline, goal area,
      centre, goal line) 39% of the time against 13% for a random frame. On the external games a
      long gap is a dead ball 93-98% of the time, and its ends match the stoppage's to the frame
      (stronger than BAR-ATH: the speed condition is there not to trust the gap alone).
+
+  9. Restart dated to the ball's first movement.  However a restart is confirmed (restart touch,
+     alive-play score, ball back after a gap), it is dated to the moment the ball, after being slow
+     (under V_MOVE for STILL_S), moves off: the slowest frame of the last second before it
+     crosses V_MOVE, if that happened within MOVE_BACK_S before the confirmation. A kick-off at the very first frame of a half is dated
+     there too.
+  10. Lightning touch.  A touch by the team without the ball that sends it at PASS_SPEED or more
+     in a direction LIGHT_ANGLE or more away from where it was going is an interception. When that
+     team then takes possession (score over the threshold, within LIGHT_BACK_S, with no touch or
+     control of the old owner in between) the possession is dated to that touch.
 
 A dead ball entered only on rules 2-4 (players or whistle) must last D_MIN_S in all and
 D_MIN_AFTER_S after it was decided: if play resumes earlier it was not a stoppage, and it is cancelled (the team that had the ball keeps it). A ball
@@ -149,6 +162,19 @@ PARAMS.update({
     "GAP_DEAD_S": 5.0,      # s: shorter gaps are occlusions (99.7% of BAR-ATH's missing frames
                             # are in gaps of 5 s or more, DATA.md)
     "GAP_RULE": 1,          # 0 switches rule 8 off (ablation)
+    "GAP_SUPPORT": 1,       # 1: a long gap is a dead ball only with another signal (see rule 8)
+    "GAP_SUPPORT_S": 2.0,   # s around the start of the gap where braking / whistle are looked for
+    # 9, restart dated to the ball's first movement
+    "RESTART_MOVE": 1,      # 0 switches it off (ablation)
+    "STILL_S": 0.5,         # s the ball must have been slow (under V_MOVE) before it moves off
+    "V_MOVE": 3.0,          # m/s: the restart sends the ball faster than a player walks with it.
+                            # A ball "lying still" is not still in this tracking: while it is placed
+                            # or held it reads 1-2.5 m/s, so slow means under V_MOVE
+    "MOVE_BACK_S": 3.0,     # s: the movement must be at most this long before the confirmation
+    # 10, lightning touch: a possession starts at the interception that began it
+    "LIGHTNING": 1,         # 0 switches it off (ablation)
+    "LIGHT_ANGLE": 60.0,    # deg: the ball's direction changes completely
+    "LIGHT_BACK_S": 4.0,    # s: the touch must be at most this long before the change is decided
     "W_RHYTHM": 0.6,        # share of rule 3 (braking) in the deadness; rule 2 (distance) the rest
     "THRESHOLD_DEAD": 1.0,
     # 4, whistle
@@ -411,6 +437,18 @@ def decide(f, blocks, n, p):
     corners = f["corners"]
     gap_start = f["gap_dead_start"].tolist()
     gap_end = f["gap_dead_end"].tolist()
+    move_onset = f["move_onset"]
+    move_back = int(p["MOVE_BACK_S"] * FPS)
+    lightning = f["lightning"].tolist()
+    light_back = int(p["LIGHT_BACK_S"] * FPS)
+
+    def restart_date(t, fallback, dead_since, kickoff):
+        """Rule 9: the ball's first movement after lying still, if recent and inside the stoppage
+        (a kick-off may sit on the first frame of the half), else the rule's own date."""
+        m = int(move_onset[t])
+        if m >= 0 and t - m <= move_back and (m > dead_since or (kickoff and m >= dead_since)):
+            return min(m, fallback)
+        return fallback
 
     near = f["dist"]
 
@@ -459,6 +497,8 @@ def decide(f, blocks, n, p):
         at = [0.0] * len(A_KEYS)
         last_change = first
         kickoff = True  # the first restart of a half is the kick-off, from the centre spot
+        last_light = [-10 ** 9, -10 ** 9]  # last lightning touch of each team
+        last_own_ev = first                 # last touch / clear control of the team in possession
 
         def change(t, start, new, reason):
             nonlocal owner, last_change, s, acc, sd, sa, dead_since, before_dead, dead_reason, pt, dt, at
@@ -498,19 +538,22 @@ def decide(f, blocks, n, p):
                     kickoff = False
                 centre_ok = at_centre[t] or not kickoff
                 if gap_end[t] and in_zone[t] and centre_ok and t - dead_since >= min_dead:
+                    d0 = restart_date(t, t, dead_since, kickoff)
                     kickoff = False
-                    change(t, t, restart_team(t, t, before_dead), "ball back")
+                    change(t, d0, restart_team(d0, t, before_dead), "ball back")
                     state[t] = owner
                     continue
                 soft = dead_reason in ("whistle", "players stopped")
                 too_short = soft and before_dead in (HOME, AWAY) and \
                     (t - dead_since < d_min or t - last_change < d_min_after)
                 if touch[t] >= 0 and in_zone[t] and centre_ok and (t - dead_since >= min_dead or soft):
-                    kickoff = False
                     if too_short:
+                        kickoff = False
                         change(t, dead_since, before_dead, "dead ball too short")
                     else:
-                        change(t, t, touch[t], "restart touch")
+                        d0 = restart_date(t, t, dead_since, kickoff)
+                        kickoff = False
+                        change(t, d0, touch[t], "restart touch")
                     state[t] = owner
                     continue
                 if visible[t] and on_pitch[t]:
@@ -545,9 +588,10 @@ def decide(f, blocks, n, p):
                     atot[k][t] = v
                 if sa >= 1.0 and too_short:
                     change(t, dead_since, before_dead, "dead ball too short")
-                elif sa >= 1.0 and t - dead_since >= min_dead:
+                elif sa >= 1.0 and (t - dead_since >= min_dead or kickoff):
+                    d0 = restart_date(t, sa_onset, dead_since, kickoff)
                     kickoff = False
-                    change(t, sa_onset, restart_team(sa_onset, t, before_dead), "alive play")
+                    change(t, d0, restart_team(d0, t, before_dead), "alive play")
                 state[t] = owner
                 continue
 
@@ -606,6 +650,10 @@ def decide(f, blocks, n, p):
                     continue
 
             # ---- possession change, as in v1 ----------------------------------------------
+            if owner in (HOME, AWAY) and (touch[t] == owner or ctrl[owner][t] > 0.5):
+                last_own_ev = t
+            if lightning[t] and touch[t] in (HOME, AWAY) and touch[t] != owner:
+                last_light[touch[t]] = t
             for c in (HOME, AWAY):
                 if c == owner:
                     s[c] = 0.0
@@ -645,7 +693,11 @@ def decide(f, blocks, n, p):
                 if start - prev > p["GAP_MIN"] and prev >= first:
                     start = (prev + start) // 2
                 c_acc = acc[winner]
-                change(t, start, winner, "touch" if c_acc[1] >= c_acc[0] else "control")
+                reason = "touch" if c_acc[1] >= c_acc[0] else "control"
+                lt = last_light[winner]
+                if p["LIGHTNING"] and lt > last_own_ev and t - lt <= light_back and lt < start:
+                    start, reason = lt, "lightning touch"
+                change(t, start, winner, reason)
             state[t] = owner
     breakdown = {"ptot": ptot, "dtot": dtot, "atot": atot, "d_reset": d_reset, "a_reset": a_reset,
                  "no_cause": no_cause}
@@ -751,11 +803,14 @@ def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, 
         (np.nan_to_num(out_dist[np.maximum(next_seen, 0)], nan=0.0) > p["OUT_MARGIN"])
     cause_cum = np.concatenate(([0], np.cumsum(duel | offside_at | gap_out)))
 
-    # rule 8: long gaps with the players walking
+    # rule 8: long gaps with the players walking, supported by another signal
     gap_dead_start = np.zeros(n, dtype=bool)
     gap_dead_end = np.zeros(n, dtype=bool)
+    gap_why = []
     if p["GAP_RULE"]:
         slow_gap = (p["SPD_PLAY"] + p["SPD_DEAD"]) / 2
+        sup = int(p["GAP_SUPPORT_S"] * FPS)
+        L, Wd = pitch
         miss = np.flatnonzero(np.diff(np.concatenate(([0], (~visible).astype(np.int8), [0]))))
         for a, b in zip(miss[::2], miss[1::2]):
             if b - a < p["GAP_DEAD_S"] * FPS or b >= n:
@@ -763,7 +818,48 @@ def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, 
             sp = pspeed[a:b]
             if np.isnan(sp).all() or np.nanmean(sp) > slow_gap:
                 continue
+            why = []
+            if p["GAP_SUPPORT"]:
+                lo, hi = max(0, a - sup), min(n, a + sup)
+                last = prev_seen[a + 1] if a + 1 < n else -1
+                if last >= 0 and (line_dist[last] <= p["NEAR_LINE"] or out_dist[last] > 0):
+                    why.append("lost near a line")
+                bx, by = ball[b]
+                spot = (min(bx, L - bx) <= 6.5 and abs(by - Wd / 2) <= 10.0) or at_centre[b]
+                if out_dist[b] > 0 or line_dist[b] <= p["NEAR_LINE"] or spot:
+                    why.append("back at a line / set-piece spot")
+                if np.nanmax(np.concatenate(([0.0], f_rhythm[lo:hi]))) >= 0.5:
+                    why.append("players braking")
+                if last >= 0 and np.nan_to_num(f_dist[max(0, last - FPS):last + 1]).mean() >= 0.5:
+                    why.append("players far from the ball")
+                if whistle_pts[lo:hi].max() > 0:
+                    why.append("whistle")
+                if not why:
+                    continue
             gap_dead_start[a], gap_dead_end[b] = True, True
+            gap_why.append((int(a), int(b), why))
+
+    # rule 9: restart = the ball moving again after lying still
+    move_onset = np.full(n, -1, dtype=np.int64)
+    if p["RESTART_MOVE"]:
+        sp = np.where(visible, speed, np.nan)
+        slow = np.nan_to_num(sp, nan=np.inf) < p["V_MOVE"]
+        slow_run = runs_at_least(slow, max(1, int(p["STILL_S"] * FPS)))
+        cross = np.flatnonzero(slow_run[:-1] & (np.nan_to_num(sp[1:], nan=0.0) >= p["V_MOVE"])) + 1
+        for c in cross:
+            lo = max(0, c - FPS)
+            k = lo + int(np.nanargmin(sp[lo:c]))  # the ball at its slowest before moving off
+            move_onset[k] = k
+        move_onset = np.maximum.accumulate(move_onset)
+
+    # rule 10: lightning touches (interceptions sent away in a new direction)
+    lightning = np.zeros(n, dtype=bool)
+    if p["LIGHTNING"]:
+        for t in np.flatnonzero(touch_team >= 0):
+            out_sp = speed[t + 2:t + 7]
+            out_sp = out_sp[np.isfinite(out_sp)]
+            if len(out_sp) and out_sp.max() >= p["PASS_SPEED"] and np.nan_to_num(angle[t]) >= p["LIGHT_ANGLE"]:
+                lightning[t] = True
 
     return {
         # read by decide()
@@ -772,7 +868,8 @@ def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, 
         "restart_zone": restart_zone, "on_pitch": on_pitch, "out_start": out_start,
         "whistle_pts": whistle_pts, "corners": corners, "prev_seen": prev_seen, "dist": dist,
         "at_centre": at_centre, "cause_cum": cause_cum, "gap_dead_start": gap_dead_start,
-        "gap_dead_end": gap_dead_end,
+        "gap_dead_end": gap_dead_end, "move_onset": move_onset, "lightning": lightning,
+        "gap_why": gap_why,
         # diagnostics only
         "vel": vel, "speed": speed, "dv": dv, "angle": angle, "slot": slot, "slow": slow,
         "is_touch": is_touch, "out_dist": out_dist, "far": far, "pspeed": pspeed,

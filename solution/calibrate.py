@@ -104,7 +104,7 @@ def row(name, per_game, ref=None):
 
 
 SWEEP_SCALES = (0.5, 0.75, 1.33, 2.0)
-SKIP = {"GAP_RULE", "CORNER_RULE", "R_CORNER", "CORNER_STAND_S", "PRESS_R", "CORNER_AREA",
+SKIP = {"GAP_RULE", "GAP_SUPPORT", "RESTART_MOVE", "LIGHTNING", "CORNER_RULE", "R_CORNER", "CORNER_STAND_S", "PRESS_R", "CORNER_AREA",
         "CORNER_BACK_S", "GAP_MIN", "OUT_MIN_FRAMES", "VEL_HALF", "DV_LAG", "TOUCH_NMS", "SPEED_LAG", "MIN_PLAYERS",
         "K_NEAR", "SPEED_MAX", "KICKOFF_MAX_S", "W_WHISTLE", "WHISTLE_LOOK_S", "WHISTLE_LEAD_S"}
 
@@ -126,6 +126,10 @@ def sweep_variants(only=None):
 
 ABLATIONS = {
     "no long-gap rule (rule 8)": {"GAP_RULE": 0},
+    "gap alone, no support (old rule 8)": {"GAP_SUPPORT": 0},
+    "no restart at first movement (rule 9)": {"RESTART_MOVE": 0},
+    "no lightning touch (rule 10)": {"LIGHTNING": 0},
+    "none of 8-support, 9, 10 (previous v2)": {"GAP_SUPPORT": 0, "RESTART_MOVE": 0, "LIGHTNING": 0},
     "no look-ahead (rule 4 v1)": {"W_LOOK": 0.0},
     "no touch (rule 2 v1)": {"W_TOUCH": 0.0, "W_TOUCH_OWN": 0.0},
     "no cause needed (rule 7)": {"NO_CAUSE_PENALTY": 0.0, "CAUSE_S": 0.0},

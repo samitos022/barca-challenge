@@ -56,7 +56,8 @@ solution/
   external/
     metrica.py          ← partite di esempio Metrica: tracking + etichette dagli eventi
     degrade.py          ← sporca i giocatori delle partite esterne come quelli di BAR-ATH
-viz/                    ← video di revisione con i punteggi frame per frame (solo uso locale)
+viz/v2_review.py        ← video di revisione: video + campo 2D + verità/v2 + grafici dei punteggi
+viz/                    ← altri video di revisione (solo uso locale)
 starter/                ← codice fornito dagli organizzatori (+ temporal_possession.py, nostro
                           primo esperimento con Viterbi, superato da v2)
 evaluation/             ← scorer ufficiale e 5 minuti di ground truth pubblica
@@ -106,13 +107,15 @@ La squadra **senza** palla accumula punti; quando arriva a 1 prende il possesso.
 | Regola | Quando |
 |---|---|
 | **Palla fuori** | la palla supera una linea di oltre 1 m: palla morta subito, datata al passaggio della linea |
-| **Buco lungo** (regola 8) | palla non tracciata per almeno 5 s **e** giocatori che camminano (velocità media sotto 1,55 m/s): palla morta dal primo frame mancante |
+| **Buco lungo** (regola 8) | palla non tracciata per almeno 5 s **e** giocatori che camminano (velocità media sotto 1,55 m/s) **e** almeno un altro segnale: palla persa vicino a una linea o ricomparsa su una linea / in un punto da calcio piazzato, giocatori che frenano o lontani dalla palla, fischio. Allora palla morta dal primo frame mancante |
 | **Giocatori fermi** | combinazione di due segnali: i 4 giocatori più vicini sono lontani dalla palla (oltre 7–12 m) e i giocatori frenano di colpo (velocità dimezzata rispetto ai 4 s prima) |
 | Fischio | aggiunge punti solo se poi i giocatori frenano (il pubblico fischia spesso) |
 
 La regola 8 è quella che conta di più. Nel tracking di Metrica la palla manca quasi sempre
 proprio a gioco fermo. Su BAR-ATH lo si vede senza etichette: nei buchi lunghi (41% dei frame) i
-giocatori vanno a 1,0 m/s, contro 1,9 m/s quando la palla è visibile.
+giocatori vanno a 1,0 m/s, contro 1,9 m/s quando la palla è visibile. Il buco però resta un
+segnale debole, perché la palla si perde anche nelle mischie: da solo non basta, serve un secondo
+segnale. Su BAR-ATH lo hanno 89 buchi su 102.
 
 ### 3. Ripresa del gioco (D → H/A)
 
@@ -122,7 +125,23 @@ giocatori vanno a 1,0 m/s, contro 1,9 m/s quando la palla è visibile.
 - **Gioco di nuovo vivo** (palla in campo, giocatori che corrono) se il tocco non si vede.
 - Il primo avvio di ogni tempo vale solo dal centro del campo (calcio d'inizio).
 
+**Quando riparte (regola 9).** In tutti i casi sopra la ripresa viene *confermata* dalla regola,
+ma *datata* al momento in cui la palla, dopo essere stata lenta (sotto 3 m/s per almeno 0,5 s),
+parte: il frame più lento dell'ultimo secondo prima che superi i 3 m/s. In questo tracking una
+palla "ferma" non è mai davvero ferma: sistemata o tenuta in mano si legge a 1–2,5 m/s. Su BAR-ATH
+anticipa 34 riprese su 110, di 1,5 s in mediana.
+
+### 4. Tocco lampo (regola 10)
+
+Un tocco della squadra senza palla che la manda a più di 6 m/s in una direzione diversa di almeno
+60° è un intercetto. Se poi quella squadra prende il possesso (entro 4 s, senza che l'altra
+squadra tocchi o controlli la palla nel frattempo), il possesso viene datato dal tocco lampo e non
+dal primo controllo.
+
 ### Opzioni
+
+Ogni regola nuova ha un interruttore in `PARAMS` (`GAP_SUPPORT`, `RESTART_MOVE`, `LIGHTNING`),
+usato da `calibrate.py ablate`.
 
 - `--fix-teams`: su BAR-ATH una squadra ha 12 giocatori nel 6% dei frame, quasi sempre perché un
   giocatore dell'altra squadra è finito nella sua. `clean_tracking.py` sposta il tracklet il cui
@@ -170,7 +189,17 @@ permettono.
 |---|---|
 | v2 di partenza | 0.550 |
 | + regola 8 (buco lungo) | 0.659 |
-| + angoli spenti (**attuale**) | **0.671** |
+| + angoli spenti | 0.671 |
+| + supporto obbligatorio per la regola 8, regole 9 e 10 (**attuale**) | **0.663** |
+
+L'ultimo passo costa 0.008 su Metrica, e lo accettiamo di proposito. Su Metrica ogni buco della
+palla è palla morta, quindi chiedere un secondo segnale fa perdere qualche caso vero. Su BAR-ATH il
+buco da solo è meno affidabile, e il supporto lo rende più robusto. Le regole 9 e 10 su Metrica
+sono neutre: lì la palla a gioco fermo non è mai visibile, quindi non si può misurarle.
+
+Sweep dei parametri (ognuno ×0.5, ×0.75, ×1.33, ×2): i valori attuali sono su un plateau. L'unica
+variazione che migliora (soglie di velocità più alte) rende la regola 8 più permissiva e sfrutta
+l'anomalia dei buchi Metrica: non adottata.
 
 Quanto vale ogni regola (se la tolgo): tocchi −0.041, verifica a 2 s −0.035, frenata −0.022.
 Sono neutre (±0.005) la regola della causa, la distanza dei giocatori e la durata minima della
@@ -181,8 +210,12 @@ il segnale c'è, ma è più debole: alla ricomparsa la palla è in posizione da 
 delle volte, contro il 64–74% su Metrica. Il guadagno reale della regola 8 sarà quindi
 probabilmente minore di +0.11.
 
-**5 minuti pubblici** (solo controllo, versione *prima* della regola 8): v2 senza fischio 0.545,
-miglior baseline ufficiale 0.424.
+**5 minuti pubblici** (solo controllo): v2 attuale senza fischio spellF1 0.545, macroF1 0.830.
+Miglior baseline ufficiale 0.424 / 0.581.
+
+**Video di revisione** (`viz/v2_review.py`): video tattico + campo 2D + strisce verità/v2 + i due
+grafici che decidono i cambi. Scrive `data/clips/BAR-ATH_v2_review_public.mp4` e un riepilogo
+`_overview.png`. Serve il video tattico in `data/tactical/BAR-ATH_tactical.mp4`.
 
 ---
 

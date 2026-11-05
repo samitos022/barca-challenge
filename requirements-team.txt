@@ -2,3 +2,4 @@
 # Final submission must also pin all transitive and additional dependencies.
 numpy==1.26.4
 pandas==2.1.4
+pillow==10.4.0  # viz/
