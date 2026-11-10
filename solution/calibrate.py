@@ -41,6 +41,8 @@ sys.path.insert(0, os.path.join(HERE, "external"))
 import clean_tracking  # noqa: E402
 import degrade  # noqa: E402
 import idsse  # noqa: E402
+import skillcorner  # noqa: E402
+import pff  # noqa: E402
 import metrica  # noqa: E402
 import possession_metrics as pm  # noqa: E402
 import possession_v2 as v2  # noqa: E402
@@ -53,13 +55,29 @@ TRACKING = "degraded"   # clean | degraded | fixed (degraded, then clean_trackin
 SEEDS = (1, 2)          # two degraded copies of every game: 6 runs per variant
 RUNS = tuple((g, s) for g in metrica.GAMES for s in SEEDS)
 IDSSE_RUNS = tuple((g, s) for g in idsse.GAMES for s in SEEDS)
-GAME_SETS = {"metrica": RUNS, "idsse": IDSSE_RUNS, "all": RUNS + IDSSE_RUNS}
+SKILL_RUNS = tuple((g, 1) for g in skillcorner.GAMES)   # broadcast tracking as it is: one run per match
+GAME_SETS = {"metrica": RUNS, "idsse": IDSSE_RUNS, "all": RUNS + IDSSE_RUNS, "skillcorner": SKILL_RUNS}
 LABELS = "flag"         # IDSSE label variant (idsse.labels); Metrica has only one
 _IDSSE_CACHE_MAX = 3    # IDSSE cases are large: keep a few per process
 
 
 def pitch_of(run):
+    if run[0] in skillcorner.GAMES:
+        return skillcorner.pitch(run[0])
+    if run[0] in pff.GAMES:
+        return pff.pitch(run[0])
     return metrica.PITCH if run[0] in metrica.GAMES else idsse.pitch(run[0])
+
+
+def _skill_case(run):
+    """SkillCorner (A-League, 20 matches): tracking made from the broadcast video, used as it is
+    whatever the variant. It already has what the others get from degrade.py: the ball lost for
+    long stretches, and above all the ball really tracked while it is carried or kicked to the
+    restart spot during a stoppage. No tracking at all (no players) during replays and close-ups."""
+    game = run[0]
+    teams, players, ball, ball_speed, _ = skillcorner.load(game)
+    lab = skillcorner.labels(game)
+    return teams, players, ball, ball_speed, skillcorner.blocks_from_labels(lab), pm.label_codes(lab)
 
 
 def _idsse_ball(game, seed, teams, players, ball, blocks):
@@ -77,14 +95,22 @@ def _idsse_case(run, variant, labels):
     teams, players, ball, ball_speed, _ = idsse.load(game)
     lab = idsse.labels(game, labels)
     blocks = idsse.blocks_from_labels(lab)
-    if variant in ("degraded", "players", "fixed", "realistic"):
+    if variant == "keeper":  # realistic + the ball lost while a keeper holds it (degrade.hide_keeper_holds)
+        holds = degrade.keeper_holds(teams, players, ball, pm.label_codes(lab), blocks, idsse.pitch(game))
+    if variant in ("degraded", "players", "fixed", "realistic", "keeper", "moved"):
         s = 100 + 10 * idsse.GAMES.index(game) + seed
+        if variant == "moved":  # realistic + the ball carried about during the stoppages (degrade.move_dead_ball)
+            moved = degrade.move_dead_ball(ball, players, pm.label_codes(lab), seed=s)
         teams, players = degrade.degrade(teams, players, seed=s)
-        if variant in ("degraded", "fixed", "realistic"):
+        if variant in ("degraded", "fixed", "realistic", "keeper", "moved"):
             ball = _idsse_ball(game, s, teams, players, ball, blocks)
-        if variant == "realistic":  # + BAR-ATH's ball shape (degrade.shape_ball)
+        if variant == "moved":  # the same gaps, on the rewritten ball
+            ball = np.where(np.isnan(ball), np.nan, moved).astype(ball.dtype)
+        if variant in ("realistic", "keeper", "moved"):  # + BAR-ATH's ball shape (degrade.shape_ball)
             ball = degrade.shape_ball(ball, seed=s)
             ball_speed = np.full(len(ball), np.nan, np.float32)
+        if variant == "keeper":
+            ball, _ = degrade.hide_keeper_holds(ball, holds, seed=s)
     if variant == "fixed":
         teams, players, _ = clean_tracking.fix_team_swaps(teams, players)
     return teams, players, ball, ball_speed, blocks, pm.label_codes(lab)
@@ -97,6 +123,25 @@ def case(run, variant=None, labels=None):
     tracking is the one we are scored on. fixed: the same, then cleaned. clean ignores the seed."""
     variant = variant or TRACKING
     game, seed = run
+    if game in pff.GAMES:
+        # PFF World Cup 2022 (broadcast tracking, as it is). "moved": the ball, which PFF does not
+        # give during a stoppage, carried to the restart spot (degrade.move_dead_ball), as for Metrica.
+        v = "moved" if variant == "moved" else "native"
+        if (run, v) not in _CASES:
+            for k in [k for k in _CASES if k[0][0] in pff.GAMES][:-2]:
+                del _CASES[k]
+            teams, players, ball, ball_speed, _ = pff.load(game)
+            lab = pff.labels(game)
+            if v == "moved":
+                ball = degrade.move_dead_ball(ball, players, pm.label_codes(lab), seed=7000 + int(game) % 1000 + seed).astype(ball.dtype)
+            _CASES[(run, v)] = (teams, players, ball, ball_speed, pff.blocks_from_labels(lab), pm.label_codes(lab))
+        return _CASES[(run, v)]
+    if game in skillcorner.GAMES:
+        if (run, "native") not in _CASES:
+            for k in [k for k in _CASES if k[0][0] in skillcorner.GAMES][:-2]:
+                del _CASES[k]
+            _CASES[(run, "native")] = _skill_case(run)
+        return _CASES[(run, "native")]
     if game in idsse.GAMES:
         key = (run, variant, labels or LABELS)
         if key not in _CASES:
@@ -105,12 +150,16 @@ def case(run, variant=None, labels=None):
                 del _CASES[k]
             _CASES[key] = _idsse_case(run, variant, labels or LABELS)
         return _CASES[key]
+    if variant == "keeper":
+        raise ValueError("the keeper condition is for IDSSE only: Metrica's ball is already missing in its stoppages")
     if (run, variant) not in _CASES:
         teams, players, ball, ball_speed, periods = metrica.load(game)
         lab = metrica.labels(game, len(ball), periods)
-        if variant in ("degraded", "fixed", "realistic"):
+        if variant == "moved":  # Metrica's ball is missing in the stoppages: here it is carried to the spot
+            ball = degrade.move_dead_ball(ball, players, pm.label_codes(lab), seed=10 * game + seed).astype(ball.dtype)
+        if variant in ("degraded", "fixed", "realistic", "moved"):
             teams, players = degrade.degrade(teams, players, seed=10 * game + seed)
-        if variant == "realistic":  # + BAR-ATH's ball shape (degrade.shape_ball)
+        if variant in ("realistic", "moved"):  # + BAR-ATH's ball shape (degrade.shape_ball)
             ball = degrade.shape_ball(ball, seed=10 * game + seed)
             ball_speed = np.full(len(ball), np.nan, np.float32)
         if variant == "fixed":

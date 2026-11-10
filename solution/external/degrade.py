@@ -262,3 +262,130 @@ if __name__ == "__main__":
         print("game {}: 11 {:.1f}%  10 {:.1f}%  9 {:.1f}%  <=8 {:.1f}%  12+ {:.1f}%".format(
             g, *(100 * np.mean(x) for x in (c == 11, c == 10, c == 9, c <= 8, c >= 12))))
     print("BAR-ATH: 11 57.6%  10 21.7%  9 5.5%  <=8 4.6%  12+ 6.2%")
+
+
+# ---- keeper holding the ball ---------------------------------------------------------------------
+# BAR-ATH's tracker loses the ball while a goalkeeper holds it in his hands (the body hides it):
+# the gap starts around the catch and ends a little after the release. degrade_ball() places its
+# gaps from the players' pace only, so it does not reproduce that. hide_keeper_holds() does, on a
+# game whose truth is known: it finds the stretches where a team is in possession with the ball at
+# its deepest player, inside its own penalty area, and removes the ball there.
+HOLD_R = 1.5         # m between the ball and the deepest player: he has it in his hands or at his feet
+HOLD_MIN_S = 1.5     # s, shorter is a touch
+HOLD_BRIDGE = 10     # frames: the condition may drop out for this long inside one hold
+HOLD_P = 0.85        # share of the holds hidden
+HOLD_EARLY = (0, 12)   # frames before the hold where the ball is already lost (the catch itself)
+HOLD_LATE = (5, 25)    # frames after the release before the ball is found again
+
+
+def keeper_holds(teams, players, ball, gt, blocks, pitch):
+    """[(first, stop, team)]: team (0 / 1, as in gt) in possession, ball within HOLD_R of its
+    deepest player, inside its own penalty area, for HOLD_MIN_S or more. Clean tracking only."""
+    L, W = pitch
+    out = []
+    for _, a, z in blocks:
+        mx = [np.nanmean(players[a:z + 1][:, teams == k, 0]) for k in (0, 1)]
+        gx = [0.0, L] if mx[0] < mx[1] else [L, 0.0]
+        B = ball[a:z + 1]
+        for k in (0, 1):
+            P = players[a:z + 1][:, teams == k]
+            dep = np.abs(P[..., 0] - gx[k])
+            j = np.argmin(np.where(np.isnan(dep), np.inf, dep), axis=1)
+            kp = P[np.arange(len(P)), j]
+            with np.errstate(invalid="ignore"):
+                cond = (gt[a:z + 1] == k) & (np.hypot(B[:, 0] - kp[:, 0], B[:, 1] - kp[:, 1]) <= HOLD_R) & \
+                    (np.abs(B[:, 0] - gx[k]) <= 16.5) & (np.abs(B[:, 1] - W / 2) <= 20.16)
+            st, en = _runs(cond)
+            merged = []
+            for s0, e0 in zip(st, en):
+                if merged and s0 - merged[-1][1] <= HOLD_BRIDGE:
+                    merged[-1][1] = e0
+                else:
+                    merged.append([s0, e0])
+            out += [(a + int(s0), a + int(e0), k) for s0, e0 in merged if e0 - s0 >= HOLD_MIN_S * FPS]
+    return sorted(out)
+
+
+def hide_keeper_holds(ball, holds, seed):
+    """(ball with HOLD_P of the holds removed, [(first, stop, team, hidden first, hidden stop)])."""
+    rng = np.random.default_rng(seed + 4241)
+    out = ball.copy()
+    done = []
+    for a, b, k in holds:
+        if rng.random() >= HOLD_P:
+            continue
+        a2 = max(0, a - int(rng.integers(HOLD_EARLY[0], HOLD_EARLY[1] + 1)))
+        b2 = min(len(ball), b + int(rng.integers(HOLD_LATE[0], HOLD_LATE[1] + 1)))
+        out[a2:b2] = np.nan
+        done.append((a, b, k, a2, b2))
+    return out, done
+
+
+# ---- the ball moved about during a stoppage --------------------------------------------------------
+# In the TRACAB matches the ball stands still while play is dead (it moves faster than 2 m/s on
+# 0.2% of the dead frames) and in the Metrica samples it is missing. A camera-based tracker like
+# BAR-ATH's keeps following it: somebody fetches the ball, carries it to the spot and puts it down
+# (in BAR-ATH's public five minutes the ball is tracked on 66% of the dead frames and moving on 60%
+# of those). move_dead_ball() rewrites the ball inside the stoppages of a game whose truth is known:
+# it stays where it went out for a moment, travels to the player who will take the restart (the one
+# closest to the restart spot when play resumes), follows him while he walks there, and is put down
+# on the spot shortly before the restart. Physical values only; nothing is fitted to BAR-ATH.
+MOVE_P = 0.8             # share of the stoppages rewritten
+MOVE_MIN_S = 3.0         # s: shorter stoppages keep the ball as it is
+MOVE_REST_S = (0.5, 2.5)   # s the ball stays where it went out
+MOVE_FETCH_V = (6.0, 14.0)  # m/s of the ball sent to the taker (a throw from a ball boy, a pass back)
+MOVE_PLACE_S = (0.6, 2.0)  # s the ball lies on the spot before the restart
+MOVE_HIDE_P = 0.3        # share of the rewritten stoppages where the ball is not seen until the taker has it
+MOVE_CARRY_R = 0.5       # m from the taker while he carries it
+
+
+def move_dead_ball(ball, players, gt, seed, dead=2):
+    """Ball with the stoppages rewritten as above. gt: truth codes per frame (dead = 2)."""
+    rng = np.random.default_rng(seed + 9133)
+    out = ball.copy()
+    n = len(ball)
+    st, en = _runs(gt == dead)
+    for a, b in zip(st, en):
+        if b - a < MOVE_MIN_S * FPS or b >= n or a == 0 or rng.random() >= MOVE_P:
+            continue
+        spot = ball[b] if not np.isnan(ball[b, 0]) else None
+        if spot is None:
+            nxt = np.flatnonzero(~np.isnan(ball[b:b + 3 * FPS, 0]))
+            if not len(nxt):
+                continue
+            spot = ball[b + nxt[0]]
+        d = np.linalg.norm(players[b] - spot, axis=1)
+        if np.isnan(d).all():
+            continue
+        taker = int(np.nanargmin(d))
+        track = players[a:b, taker]
+        if np.isnan(track[:, 0]).mean() > 0.3:
+            continue
+        ok = ~np.isnan(track[:, 0])
+        idx = np.arange(b - a)
+        track = np.stack([np.interp(idx, idx[ok], track[ok, k]) for k in (0, 1)], axis=1)
+        m = b - a
+        place = min(int(rng.uniform(*MOVE_PLACE_S) * FPS), m // 3)
+        rest = min(int(rng.uniform(*MOVE_REST_S) * FPS), m // 3)
+        start = ball[a - 1] if not np.isnan(ball[a - 1, 0]) else track[0]
+        seg = np.empty((m, 2), dtype=np.float64)
+        seg[:rest] = start
+        # sent to the taker: it arrives where he is at that moment
+        v = rng.uniform(*MOVE_FETCH_V)
+        t1 = rest
+        for _ in range(3):   # the flight time depends on where the taker is when it arrives
+            t1 = min(m - place - 1, rest + max(2, int(np.linalg.norm(track[min(t1, m - 1)] - start) / v * FPS)))
+        t1 = max(t1, rest + 1)
+        w = np.linspace(0, 1, t1 - rest + 1)[1:, None]
+        seg[rest:t1] = start + w * (track[t1 - 1] - start)
+        ang = rng.uniform(0, 2 * np.pi)
+        off = MOVE_CARRY_R * np.array([np.cos(ang), np.sin(ang)])
+        seg[t1:m - place] = track[t1:m - place] + off
+        # put down on the spot
+        k0 = m - place
+        w = np.clip(np.arange(place) / max(int(0.4 * FPS), 1), 0, 1)[:, None]
+        seg[k0:] = seg[k0 - 1] + w * (spot - seg[k0 - 1])
+        if rng.random() < MOVE_HIDE_P:
+            seg[:t1] = np.nan
+        out[a:b] = seg
+    return out

@@ -48,11 +48,12 @@ PARAMS = {
 }
 
 
-def _decode(game):
-    if not os.path.exists(video_path(game)):
-        raise FileNotFoundError("{} missing: the whistle needs the tactical video's audio "
-                                "(or run possession_v2.py --no-whistle)".format(video_path(game)))
-    cmd =["ffmpeg", "-v", "error", "-i", video_path(game), "-vn", "-ac", "1", "-ar", str(SR),
+def _decode(game, source="tactical"):
+    path = video_path(game) if source == "tactical" else video_path(game, source=source)
+    if not os.path.exists(path):
+        raise FileNotFoundError("{} missing: the whistle needs the {} video's audio "
+                                "(or run possession_v2.py --no-whistle)".format(path, source))
+    cmd =["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", str(SR),
            "-f", "s16le", "-"]
     raw = subprocess.run(cmd, stdout=subprocess.PIPE, check=True).stdout
     return np.frombuffer(raw, dtype=np.int16)
@@ -129,6 +130,48 @@ def load(game=GAME):
         os.makedirs(CACHE_DIR, exist_ok=True)
         np.savez(path, spec_db=spec_db, bf=bf)
     return detect(spec_db, bf)
+
+
+# ---- the same tone in the broadcast audio --------------------------------------------------------
+# The tactical camera hears the crowd better than the referee, and fans whistle too: 12 events a
+# minute during play. The broadcast has its own microphones, by the pitch: the referee's whistle is
+# in both sound tracks at the same moment and pitch, a fan whistling next to the tactical camera
+# is only in one. second_microphone() gives, for every tactical event, how loud a tone of the same
+# pitch is in the broadcast audio at that moment (dB over its background, like TONE_DB).
+PITCH_TOL = 150.0     # Hz between the two recordings of the same blast
+TIME_TOL = 10         # frames (0.4 s): sound reaches the far tactical camera up to 0.3 s late
+
+
+def broadcast_transient(game=GAME):
+    """(transient dB per broadcast frame and frequency bin, bin frequencies), cached."""
+    path = os.path.join(CACHE_DIR, "{}_broadcast_audio_features.npz".format(game))
+    if os.path.exists(path):
+        z = np.load(path)
+        spec_db, bf = z["spec_db"], z["bf"]
+    else:
+        print("decoding the broadcast audio once (cached in data/derived/) ...", flush=True)
+        spec_db, bf = features(_decode(game, "broadcast"), source_frames("broadcast", game))
+        np.savez(path, spec_db=spec_db, bf=bf)
+    return transient(spec_db), bf
+
+
+def second_microphone(events, game=GAME):
+    """(k,) dB of the broadcast audio at each tactical event's pitch and time (NaN where the
+    broadcast does not cover that moment). Uses the stretch offsets of sync_broadcast."""
+    import sync_broadcast
+    segs = np.load(sync_broadcast.OUT)["segments"]
+    trans, bf = broadcast_transient(game)
+    out = np.full(len(events), np.nan, dtype=np.float32)
+    for i, (a, b, pitch, _) in enumerate(events):
+        for b0, b1, off in segs:
+            lo, hi = a - off - TIME_TOL, b - off + TIME_TOL
+            if hi < b0 or lo > b1:
+                continue
+            lo, hi = max(lo, b0, 0), min(hi, b1, len(trans) - 1)
+            cols = np.abs(bf - pitch) <= PITCH_TOL
+            if hi >= lo and cols.any():
+                out[i] = float(trans[lo:hi + 1][:, cols].max())
+    return out
 
 
 if __name__ == "__main__":

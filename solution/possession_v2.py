@@ -17,6 +17,8 @@ Entering the dead ball (H/A -> D)
      previous 5 s brake (ratio under 0.7) on 0-2% of frames, against about a third when the ball
      has just gone out.
      2 and 3 average into a 0..1 "deadness". Above 0.5 the dead-ball score grows, below it shrinks;
+     since 10/11 rule 2 is one-sided (DIST_ENTRY = 2): players far from the ball add points, players
+     close to it count as neutral (they also gather round the ball after a foul);
      a fast ball or a touch in play resets it.
   4. Whistle.  A whistle-like tone in the audio adds points only if the players then brake (rule 3)
      in the next WHISTLE_LOOK_S seconds (whistle.py explains why the audio alone is not trusted).
@@ -69,6 +71,22 @@ Entering the dead ball (H/A -> D)
      in a direction LIGHT_ANGLE or more away from where it was going is an interception. When that
      team then takes possession (score over the threshold, within LIGHT_BACK_S, with no touch or
      control of the old owner in between) the possession is dated to that touch.
+  12. The keeper holds the ball.  The tracker loses the ball while a goalkeeper has it in his
+     hands, so a gap that starts in or near a penalty area is either a real stoppage (goal kick,
+     corner, goal) or the keeper holding it: alive, his team in possession. Where the ball is
+     seen again tells them apart: in the goal area, at a corner flag, at the centre spot or on a
+     line it was a stoppage (on other matches: dead 89-100% of the time); anywhere else, with the
+     gap no longer than KEEP_MAX_S and the players not walking (mean speed KEEP_PACE or more, set
+     below the pace of play because the game slows down while a keeper holds the ball), the team
+     defending that goal has the ball from the first missing frame, and rule 8 does not apply.
+     A ball last seen within KEEP_GOAL_LINE of the goal line went out instead (dead 88-98%).
+  13. Players lined up for a set piece (layout.py), read from the players alone, so it works while
+     the ball is lost. A wall (three team-mates standing side by side), a slow player at a corner
+     flag with the box full, or everybody in his own half (kick-off after a goal) start a dead
+     ball, dated to when the dead-ball score began to rise if it was rising, else to the first
+     frame of the layout; once per layout, so the free kick taken in front of the wall is not
+     stopped again. On other matches these layouts are a dead ball on 99.7% / 97% / 92% of their
+     frames. A slow player on a touchline (throw-in, 82%) is only a support of rule 8.
 
 A dead ball entered only on rules 2-4 (players or whistle) must last D_MIN_S in all and
 D_MIN_AFTER_S after it was decided: if play resumes earlier it was not a stoppage, and it is cancelled (the team that had the ball keeps it). A ball
@@ -112,15 +130,20 @@ sys.path.insert(0, HERE)
 from games import GAME, GAMES, half_video_blocks, source_frames  # noqa: E402
 from baseline import write_submission  # noqa: E402
 import clean_tracking  # noqa: E402
+import layout  # noqa: E402
 import possession_v1 as v1  # noqa: E402
 import tracking  # noqa: E402
 import sync_broadcast  # noqa: E402
 import whistle  # noqa: E402
 
 FPS = 25
+STEMS = {"tactical": "v2", "fused": "v2f", "tactical_clean": "v2c"}
+
+
 def outputs(source="tactical", use_whistle=True):
-    """(submission csv, diagnostics npz): v2_* tactical, v2f_* fused, *_nowhistle without rule 4."""
-    stem = "v2" if source == "tactical" else "v2f"
+    """(submission csv, diagnostics npz): v2_* tactical, v2f_* fused, v2c_* tactical_clean (teams
+    re-assigned and frozen positions removed), *_nowhistle without rule 4."""
+    stem = STEMS[source]
     tail = "" if use_whistle else "_nowhistle"
     return (os.path.join(ROOT, "evaluation", "results", "{}_possession{}.csv".format(stem, tail)),
             os.path.join(ROOT, "data", "derived", "{}_diagnostics{}.npz".format(stem, tail)))
@@ -194,9 +217,32 @@ PARAMS.update({
     "LIGHT_BACK_S": 4.0,    # s: the touch must be at most this long before the change is decided
     # 11, touch sequence: two touches in a row by the team without the ball
     "SEQ_RULE": 1,          # 0 switches it off (ablation)
+    # 13, players lined up for a set piece (layout.py)
+    "LAYOUT_RULE": 1,       # 0 switches it off (ablation)
+    "LAYOUT_SUPPORT_S": 1.0,  # s of any layout (throw-in included) inside a gap: a support of rule 8
+    # 12, the keeper holds the ball (thresholds from other matches, analisi/buchi_area.py)
+    "KEEPER_RULE": 1,       # 0 switches it off (ablation)
+    "KEEP_MIN_S": 2.0,      # s: shorter gaps are occlusions, the machine carries on
+    "KEEP_MAX_S": 20.0,     # s: no keeper holds the ball longer (the law allows 8 s)
+    "KEEP_PACE": 1.2,       # m/s, mean player speed in the gap: under it the players are walking
+                            # (stoppage 96%); keeper in hand: 1.6-2.2 against 2.1 in open play
+    "KEEP_MARGIN": 5.0,     # m around the penalty area where the ball was last seen
+    "KEEP_GOAL_LINE": 2.0,  # m: a ball last seen this close to the goal line went out
+    "KEEP_SPOT": 1.0,       # m around the goal area: the ball is back at a goal-kick spot
+    "KEEP_CORNER": 4.0,     # m from a corner flag: the ball is back at a corner
+    "KEEP_LINE": 2.0,       # m from a line: the ball is back at a throw-in / goal-line spot
     "SEQ_MIN_S": 0.4,       # s: closer than this two touches are one contact seen twice
     "SEQ_S": 3.0,           # s: "keeps the ball for a few seconds" (CHALLENGE.md)
     "W_RHYTHM": 0.6,        # share of rule 3 (braking) in the deadness; rule 2 (distance) the rest
+    # Rule 2 (players far from the ball) only ever ADDS to the dead-ball score: after a foul the
+    # players often stand around the ball, so "players close" is not evidence of play and no
+    # longer takes points away. External matches (realistic): two-sided 0.322 / 0.339 / 0.578
+    # (DFL flag / DFL tracab / Metrica), one-sided 0.323 / 0.341 / 0.580, off 0.326 / 0.344 / 0.571.
+    "DIST_ENTRY": 2,        # dead-ball score: 0 rule 2 off (braking alone), 1 two-sided (close players
+                            # subtract), 2 one-sided (close players count as neutral), 3 one-sided
+                            # with braking taking the whole weight when the players are close
+    "DIST_EXIT": 1,         # 1: rule 2 enters the alive-play score when leaving a dead ball
+    "DIST_SUPPORT": 1,      # 1: "players far from the ball" is a support of rule 8
     "THRESHOLD_DEAD": 1.0,
     # 4, whistle
     "W_WHISTLE": 0.3,       # points if the players then brake completely (crowds whistle too)
@@ -222,6 +268,7 @@ PARAMS.update({
 })
 
 HOME, AWAY, NONE, DEAD = 0, 1, -1, 2
+LAYOUT_REASON = {1: "kick-off formation", 2: "corner layout", 3: "wall"}
 RESTART_LOOK = 12  # frames each side of the restart in which the taker is looked for (0.5 s)
 P_KEYS = ("ctrl", "touch", "look", "own", "decay")   # possession score breakdown
 D_KEYS = ("dist", "rhythm", "whistle")               # dead-ball score breakdown
@@ -444,6 +491,7 @@ def decide(f, blocks, n, p):
     d_min = int(p["D_MIN_S"] * FPS)
     d_min_after = int(p["D_MIN_AFTER_S"] * FPS)
     w_rhythm = p["W_RHYTHM"]
+    dist_entry = int(p["DIST_ENTRY"])
     visible = f["visible"].tolist()
     fast = f["fast"].tolist()
     in_zone = f["restart_zone"].tolist()
@@ -463,6 +511,9 @@ def decide(f, blocks, n, p):
     lightning = f["lightning"].tolist()
     light_back = int(p["LIGHT_BACK_S"] * FPS)
     seq_min, seq_max = int(p["SEQ_MIN_S"] * FPS), int(p["SEQ_S"] * FPS)
+    keeper_at = f["keeper_at"].tolist()
+    lay_code = f["lay_code"].tolist()
+    lay_onset = f["lay_onset"].tolist()
 
     def restart_date(t, fallback, dead_since, kickoff):
         """Rule 9: the ball's first movement after lying still, if recent and inside the stoppage
@@ -501,6 +552,7 @@ def decide(f, blocks, n, p):
     atot = {k: np.zeros(n, dtype=np.float32) for k in A_KEYS}
     d_reset = np.zeros(n, dtype=np.int8)  # why the dead-ball score went to 0 (RESET_* codes)
     no_cause = np.zeros(n, dtype=bool)     # threshold reached but rule 7 found no cause yet
+    cause_ok = np.zeros(n, dtype=bool)     # rule 7's window (from CAUSE_S before the score rose) has a cause
     a_reset = np.zeros(n, dtype=np.int8)
 
     for _, first, last in blocks:
@@ -521,6 +573,7 @@ def decide(f, blocks, n, p):
         kickoff = True  # the first restart of a half is the kick-off, from the centre spot
         last_light = [-10 ** 9, -10 ** 9]  # last lightning touch of each team
         seq_first = [-1, -1]                # first touch of each challenger's current touch run
+        lay_fired = -1                      # first frame of the last layout rule 13 has looked at
         last_own_ev = first                 # last touch / clear control of the team in possession
 
         def change(t, start, new, reason):
@@ -548,6 +601,19 @@ def decide(f, blocks, n, p):
                 if owner != DEAD:
                     change(t - 1, start, DEAD, "corner")
                 change(t, t, kicker, "corner kick")
+                state[t] = owner
+                continue
+            # ---- rule 13: the players are lined up for a set piece, once per layout --------
+            if lay_code[t] and lay_onset[t] != lay_fired:
+                lay_fired = lay_onset[t]
+                if owner != DEAD:
+                    change(t, sd_onset if sd > 0.0 else t, DEAD, LAYOUT_REASON[lay_code[t]])
+                    state[t] = owner
+                    continue
+            # ---- rule 12: the keeper has the ball in his hands (not a stoppage) -----------
+            if keeper_at[t] != NONE and owner != DEAD:
+                if owner != keeper_at[t]:
+                    change(t, t, keeper_at[t], "keeper holds the ball")
                 state[t] = owner
                 continue
             # ---- rule 8: a long gap with the players walking ------------------------------
@@ -632,7 +698,15 @@ def decide(f, blocks, n, p):
                 # its share of the points, all of them when the other cannot be measured
                 rw = rate_dead * (1.0 if visible[t] else p["GAP_WEIGHT"])
                 fd, fr = f_dist_l[t], f_rhythm_l[t]
-                okd, okr = visible[t] and fd == fd, fr == fr
+                okd, okr = dist_entry > 0 and visible[t] and fd == fd, fr == fr
+                if okd and fd < 0.5 and dist_entry >= 2:
+                    # players close to the ball are not evidence of play (they gather round it
+                    # after a foul): rule 2 only ever adds. 2: it counts as neutral; 3: braking
+                    # takes the whole weight, as when the distance cannot be measured
+                    if dist_entry == 2:
+                        fd = 0.5
+                    else:
+                        okd = False
                 if okd and okr:  # deadness = (1 - W_RHYTHM) * fd + W_RHYTHM * fr
                     gd = 2.0 * (1.0 - w_rhythm) * rw * (fd - 0.5)
                     gr = 2.0 * w_rhythm * rw * (fr - 0.5)
@@ -658,6 +732,7 @@ def decide(f, blocks, n, p):
                 else:
                     dt = [dt[0] + gd, dt[1] + gr, dt[2] + gw]
             dead_score[t] = sd
+            cause_ok[t] = cause_cum[t + 1] - cause_cum[max(first, sd_onset - cause_back)] > 0
             for k, v in zip(D_KEYS, dt):
                 dtot[k][t] = v
             if sd >= thr_dead:
@@ -735,7 +810,7 @@ def decide(f, blocks, n, p):
                 change(t, start, winner, reason)
             state[t] = owner
     breakdown = {"ptot": ptot, "dtot": dtot, "atot": atot, "d_reset": d_reset, "a_reset": a_reset,
-                 "no_cause": no_cause}
+                 "no_cause": no_cause, "cause_ok": cause_ok}
     return state, live, score, dead_score, alive_score, changes, refused, breakdown
 
 
@@ -811,13 +886,15 @@ def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, 
     rhythm = pace_ratio(pspeed, p)
     f_rhythm = np.clip((p["R_PLAY"] - rhythm) / (p["R_PLAY"] - p["R_DEAD"]), 0, 1)
 
-    def combine(f_play, w_play):
+    def combine(f_play, w_play, use_dist=True):
+        if not use_dist:
+            return np.nan_to_num(f_play, nan=0.5).astype(np.float32)
         both = np.where(np.isnan(f_dist), f_play,
                         np.where(np.isnan(f_play), f_dist, (1 - w_play) * f_dist + w_play * f_play))
         return np.nan_to_num(np.where(visible, both, f_play), nan=0.5).astype(np.float32)
 
-    deadness = combine(f_rhythm, p["W_RHYTHM"])  # entering: distance + braking (review video only)
-    deadness_exit = combine(f_speed, 0.5)        # leaving: distance + absolute pace
+    deadness = combine(f_rhythm, p["W_RHYTHM"], p["DIST_ENTRY"])  # entering: distance + braking (review video only)
+    deadness_exit = combine(f_speed, 0.5, p["DIST_EXIT"])         # leaving: distance + absolute pace
     fast = visible & np.nan_to_num(speed > p["V_FAST"], nan=False)
 
     # rule 4: whistle, confirmed by the players braking afterwards
@@ -837,6 +914,17 @@ def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, 
     gap_out = ~visible & (next_seen >= 0) & \
         (np.nan_to_num(out_dist[np.maximum(next_seen, 0)], nan=0.0) > p["OUT_MARGIN"])
     cause_cum = np.concatenate(([0], np.cumsum(duel | offside_at | gap_out)))
+
+    # rule 13: layouts of a set piece, from the players alone
+    lay = layout.signals(teams, players, blocks, pitch)
+    lay_code = np.zeros(n, dtype=np.int8)                  # 1 kick-off, 2 corner, 3 wall
+    if p["LAYOUT_RULE"]:
+        for code, key in ((1, "kickoff"), (2, "corner"), (3, "wall")):
+            lay_code[lay[key] & (lay_code == 0)] = code
+    lay_on = lay_code > 0
+    lay_onset = np.where(lay_on, np.maximum.accumulate(
+        np.where(lay_on & ~np.concatenate(([False], lay_on[:-1])), np.arange(n), -1)), -1)
+    lay_any = lay["kickoff"] | lay["corner"] | lay["wall"] | lay["throw"]
 
     # rule 8: long gaps with the players walking, supported by another signal
     gap_dead_start = np.zeros(n, dtype=bool)
@@ -865,16 +953,77 @@ def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, 
                     why.append("back at a line / set-piece spot")
                 if np.nanmax(np.concatenate(([0.0], f_rhythm[lo:hi]))) >= 0.5:
                     why.append("players braking")
-                if last >= 0 and np.nan_to_num(f_dist[max(0, last - FPS):last + 1]).mean() >= 0.5:
+                if p["DIST_SUPPORT"] and last >= 0 and np.nan_to_num(f_dist[max(0, last - FPS):last + 1]).mean() >= 0.5:
                     why.append("players far from the ball")
                 if whistle_pts[lo:hi].max() > 0:
                     why.append("whistle")
                 if broadcast_cut is not None and broadcast_cut[a:b].mean() >= p["CUT_SHARE"]:
                     why.append("broadcast cut away")
+                if p["LAYOUT_RULE"] and lay_any[a:b].sum() >= p["LAYOUT_SUPPORT_S"] * FPS:
+                    why.append("players lined up")
                 if not why:
                     continue
             gap_dead_start[a], gap_dead_end[b] = True, True
             gap_why.append((int(a), int(b), why))
+
+    # rule 12: the keeper holds the ball (a gap that starts by a penalty area and is not a stoppage)
+    keeper_at = np.full(n, NONE, dtype=np.int8)
+    keeper_gaps = []
+    gap_table = []     # every gap of KEEP_MIN_S or more: (first, stop, pace, rule 8 verdict, rule 12 verdict)
+    L, Wd = pitch
+    sides = attack_sides(players, teams, blocks)
+    dead8 = {(ga, gb): why for ga, gb, why in gap_why}
+    slow_gap = (p["SPD_PLAY"] + p["SPD_DEAD"]) / 2
+    miss = np.flatnonzero(np.diff(np.concatenate(([0], (~visible).astype(np.int8), [0]))))
+    for a, b in zip(miss[::2], miss[1::2]):
+        if a == 0 or b >= n or b - a < p["KEEP_MIN_S"] * FPS:
+            continue
+        half = next((h for h, f0, l0 in blocks if f0 < a and b <= l0), None)
+        if half is None:
+            continue
+        sp = pspeed[a:b]
+        pace = float(np.nanmean(sp)) if not np.isnan(sp).all() else float("nan")
+        if (int(a), int(b)) in dead8:
+            v8 = "dead: " + (", ".join(dead8[(int(a), int(b))]) or "gap and pace alone")
+        elif not p["GAP_RULE"]:
+            v8 = "off"
+        elif b - a < p["GAP_DEAD_S"] * FPS:
+            v8 = "short"
+        elif not pace <= slow_gap:
+            v8 = "players moving"
+        else:
+            v8 = "no support"
+        lx, ly = ball[a - 1]
+        low = lx <= L / 2                                # the goal at x = 0 is the near one
+        defender = sides[half] if low else 1 - sides[half]
+        gl = lx if low else L - lx
+        bx, by = ball[b]
+        gb = bx if low else L - bx
+        if not p["KEEPER_RULE"]:
+            v12 = "off"
+        elif not (gl <= 16.5 + p["KEEP_MARGIN"] and abs(ly - Wd / 2) <= 20.16 + p["KEEP_MARGIN"]):
+            v12 = "not by a box"
+        elif gl <= p["KEEP_GOAL_LINE"]:
+            v12 = "lost on the goal line"
+        elif b - a > p["KEEP_MAX_S"] * FPS:
+            v12 = "too long"
+        elif gb <= 5.5 + p["KEEP_SPOT"] and abs(by - Wd / 2) <= 9.16 + p["KEEP_SPOT"]:
+            v12 = "back in the goal area"
+        elif gb <= p["KEEP_CORNER"] and min(by, Wd - by) <= p["KEEP_CORNER"]:
+            v12 = "back at the corner"
+        elif at_centre[b]:
+            v12 = "back at the centre"
+        elif out_dist[b] > 0 or line_dist[b] <= p["KEEP_LINE"]:
+            v12 = "back on a line"
+        elif not pace >= p["KEEP_PACE"]:
+            v12 = "players walking"
+        elif lay_on[a:b].any():
+            v12 = "players lined up"
+        else:
+            v12 = "keeper"
+            keeper_at[a] = defender
+            keeper_gaps.append((int(a), int(b), int(defender)))
+        gap_table.append((int(a), int(b), pace, v8, v12))
 
     # rule 9: restart = the ball moving again after lying still
     move_onset = np.full(n, -1, dtype=np.int64)
@@ -914,7 +1063,8 @@ def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, 
         "whistle_pts": whistle_pts, "corners": corners, "prev_seen": prev_seen, "dist": dist,
         "at_centre": at_centre, "cause_cum": cause_cum, "gap_dead_start": gap_dead_start,
         "gap_dead_end": gap_dead_end, "move_onset": move_onset, "lightning": lightning,
-        "gap_why": gap_why,
+        "gap_why": gap_why, "keeper_at": keeper_at, "keeper_gaps": keeper_gaps, "gap_table": gap_table,
+        "lay_code": lay_code, "lay_onset": lay_onset, "layout": lay,
         # diagnostics only
         "vel": vel, "speed": speed, "dv": dv, "angle": angle, "slot": slot, "slow": slow,
         "is_touch": is_touch, "out_dist": out_dist, "far": far, "pspeed": pspeed,
@@ -962,9 +1112,15 @@ def save_diagnostics(path, f, r, p):
         whistle_conf=f["whistle_conf"], changes=ch, reasons=np.array([x for *_, x in r["changes"]]),
         corners=corner_arr, threshold=p["THRESHOLD"], threshold_dead=p["THRESHOLD_DEAD"],
         duel=f["duel"], gap_out=f["gap_out"],
+        lay_kickoff=f["layout"]["kickoff"], lay_corner=f["layout"]["corner"], lay_throw=f["layout"]["throw"],
+        lay_wall=f["layout"]["wall"],
+        gap_ab=np.array([g[:2] for g in f["gap_table"]], dtype=np.int64).reshape(-1, 2),
+        gap_pace=np.array([g[2] for g in f["gap_table"]], dtype=np.float32),
+        gap_r8=np.array([g[3] for g in f["gap_table"]], dtype=str),
+        gap_r12=np.array([g[4] for g in f["gap_table"]], dtype=str),
         offsides=np.array(f["offs"], dtype=np.int64).reshape(-1, 3),
         refused=np.array(r["refused"], dtype=np.int64).reshape(-1, 2),
-        d_reset=bd["d_reset"], a_reset=bd["a_reset"], no_cause=bd["no_cause"],
+        d_reset=bd["d_reset"], a_reset=bd["a_reset"], no_cause=bd["no_cause"], cause_ok=bd["cause_ok"],
         no_cause_penalty=p["NO_CAUSE_PENALTY"],
         **{"ptot_" + k: v for k, v in bd["ptot"].items()},
         **{"dtot_" + k: v for k, v in bd["dtot"].items()},
@@ -981,6 +1137,7 @@ def print_summary(labels, f, r, blocks, names):
     print("whistle-like events {}, confirmed by players stopping {}".format(
         f["whistle_events"], int(np.sum(f["whistle_pts"] > 0))))
     print("corner kicks found: {}".format(len(f["corners"])))
+    print("gaps read as the keeper holding the ball: {}".format(len(f["keeper_gaps"])))
     print("contest near the ball on {:.1f}% of graded frames; passes received offside: {}".format(
         100 * (f["duel"][graded].mean() if graded.any() else 0), len(f["offs"])))
     print("dead balls entered without a contest or offside (penalty paid): {}".format(
@@ -1026,7 +1183,7 @@ def main(source="tactical", use_whistle=True, fix_teams=False):
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tracking", choices=("tactical", "fused"), default="tactical",
+    ap.add_argument("--tracking", choices=tuple(STEMS), default="tactical",
                     help="fused = tactical + broadcast (run sync_broadcast.py and fusion.py first)")
     ap.add_argument("--no-whistle", action="store_true",
                     help="skip rule 4 (no tactical video needed); writes *_nowhistle outputs")

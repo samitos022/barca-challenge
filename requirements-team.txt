@@ -3,3 +3,9 @@
 numpy==1.26.4
 pandas==2.1.4
 pillow==10.4.0  # viz/
+
+# Learnt models (solution/possession_ml.py, solution/team_reassign.py). Not pinned yet: developed
+# with scikit-learn 1.9 on Python 3.14; pin and test before the final submission.
+scikit-learn
+# Only to download the PFF World Cup 2022 open data (solution/external/pff.py --download).
+gdown

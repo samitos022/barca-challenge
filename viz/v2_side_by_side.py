@@ -5,7 +5,7 @@ LIVE / NOT LIVE from the tracking check), and the 2D pitch (right, tactical or f
 velocity arrow, a line to the closest player of each team, and a white ring on the K players used
 by the "players far" rule. Bottom:
   - the v2 label (as written in the submission, changes back-dated) and the live machine state;
-  - three 5-minute strips: ground truth (public window only), v2, baseline smooth50;
+  - two 5-minute strips: ground truth (public window only) and v2;
   - the scores over the page: possession challenger (team colours), dead ball (white) while in
     play, alive play (green) while dead, with the changes;
   - a +/-5 s zoom with the same scores, ball speed, touches and whistle-like tones;
@@ -61,7 +61,25 @@ DECAY = 0.5 ** (1.0 / (v2.PARAMS["HALF_LIFE"] * 25))
 REASON_IT = {"control": "controllo", "touch": "tocco", "ball out": "palla fuori",
              "players stopped": "giocatori fermi", "whistle": "fischio", "corner": "calcio d'angolo",
              "corner kick": "calcio d'angolo battuto", "restart touch": "tocco di ripresa",
-             "alive play": "gioco ripreso", "dead ball too short": "palla morta troppo breve, annullata"}
+             "alive play": "gioco ripreso", "dead ball too short": "palla morta troppo breve, annullata",
+             "keeper holds the ball": "portiere con la palla in mano",
+             "ball lost, players walking": "palla persa, giocatori al passo", "ball back": "palla ricomparsa",
+             "touch sequence": "due tocchi di fila", "kick-off formation": "schierati per il calcio d'inizio",
+             "corner layout": "schierati per il calcio d'angolo", "wall": "barriera"}
+GAP8_IT = {"lost near a line": "persa vicino a una linea",
+           "back at a line / set-piece spot": "ricompare su una linea o punto di ripresa",
+           "players braking": "giocatori che frenano", "players far from the ball": "giocatori lontani",
+           "whistle": "fischio", "broadcast cut away": "regia staccata", "gap and pace alone": "solo buco e ritmo",
+           "players lined up": "giocatori schierati",
+           "players moving": "no: giocatori in movimento", "no support": "no: nessun altro segnale",
+           "short": "no: sotto 5 s è un'occlusione", "off": "regola spenta"}
+GAP12_IT = {"keeper": "SÌ: possesso a chi difende", "not by a box": "no: persa lontano dall'area",
+            "lost on the goal line": "no: persa sulla linea di porta (uscita)", "too long": "no: buco troppo lungo",
+            "back in the goal area": "no: ricompare in area piccola (rimessa dal fondo)",
+            "back at the corner": "no: ricompare all'angolo", "back at the centre": "no: ricompare a centrocampo",
+            "back on a line": "no: ricompare su una linea", "players walking": "no: giocatori al passo",
+            "players lined up": "no: giocatori schierati per un calcio piazzato",
+            "off": "regola spenta"}
 
 
 def page_chart(series, changes):
@@ -97,7 +115,9 @@ def main():
     ap.add_argument("--first", type=int, default=ms.GT_FIRST)
     ap.add_argument("--last", type=int, default=ms.GT_LAST)
     ap.add_argument("--out", default="BAR-ATH_v2_gt_public.mp4")
-    ap.add_argument("--tracking", choices=("tactical", "fused"), default="tactical")
+    ap.add_argument("--tracking", choices=tuple(v2.STEMS), default="tactical")
+    ap.add_argument("--panel", choices=("auto", "dead"), default="auto",
+                    help="auto: the threshold closest to firing; dead: always every dead-ball parameter")
     args = ap.parse_args()
     first, last = max(0, args.first), min(N_VIDEO - 1, args.last)
     n = last - first + 1
@@ -129,6 +149,11 @@ def main():
     duel = z["duel"]
     duel_frames = np.flatnonzero(duel)
     gap_out = z["gap_out"]
+    cause_ok = z["cause_ok"]
+    lay = [("calcio d'inizio", z["lay_kickoff"], True), ("calcio d'angolo", z["lay_corner"], True),
+           ("barriera", z["lay_wall"], True), ("rimessa laterale", z["lay_throw"], False)]
+    gap_ab, gap_pace = z["gap_ab"], z["gap_pace"]
+    gap_r8, gap_r12 = [str(x) for x in z["gap_r8"]], [str(x) for x in z["gap_r12"]]
     offs = [tuple(int(v) for v in row) for row in z["offsides"]]
     refused = [tuple(int(v) for v in row) for row in z["refused"]]
     cause_s = p["CAUSE_S"]
@@ -147,6 +172,9 @@ def main():
 
     gt_img, base_img, _ = ms.long_strips(gt_labels, is_gt, base, [], 1, None)
     _, v2_img, _ = ms.long_strips(gt_labels, is_gt, lab_v2, [], 1, None)
+    ml_path = csv_path.replace("_possession", "ml3_possession")
+    lab_ml = ms.read_csv_labels(ml_path) if os.path.exists(ml_path) else None
+    ml_img = ms.long_strips(gt_labels, is_gt, lab_ml, [], 1, None)[1] if lab_ml is not None else None
     in_play = (live == 0) | (live == 1)
     chart_img = page_chart([(score[0] / thr, TEAM_LINE[0]), (score[1] / thr, TEAM_LINE[1]),
                             (np.where(in_play, dead_score / thr_dead, 0), DEAD_LINE),
@@ -259,18 +287,19 @@ def main():
                              else ("in campo" if visible[f] else "non tracciata: la posizione non decide"),
                              "", ""), ACCENT if visible[f] and od > p["OUT_MARGIN"] else DIM))
         rw = p["RATE_DEAD"] * (1.0 if visible[f] else p["GAP_WEIGHT"])
-        fd, fr = (float(f_dist[f]) if visible[f] else np.nan), float(f_rhythm[f])
+        fd, fr = (float(f_dist[f]) if visible[f] and p["DIST_ENTRY"] else np.nan), float(f_rhythm[f])
         both = np.isfinite(fd) and np.isfinite(fr)
-        wr = p["W_RHYTHM"]
+        wr = p["W_RHYTHM"] if p["DIST_ENTRY"] else 1.0
         nd = rw * (2 * (1 - wr) * (fd - 0.5) if both else (2 * fd - 1)) if np.isfinite(fd) else np.nan
         nr = rw * (2 * wr * (fr - 0.5) if both else (2 * fr - 1)) if np.isfinite(fr) else np.nan
         if recent(d_reset, f, 0):
             nd = nr = 0.0
-        rows.append(("row", ("2 Distanza {} più vicini ({:.0f}%)".format(k_near, 100 * (1 - p["W_RHYTHM"])),
-                             "{} → {}".format(fmt(far[f], 1, " m"), fmt(fd, 2)) if visible[f]
-                             else "serve la palla", pts(nd, True), pts(dtot["dist"][f])),
-                     TEXT if visible[f] else DIM))
-        rows.append(("row", ("3 Frenata del ritmo ({:.0f}%)".format(100 * p["W_RHYTHM"]),
+        if p["DIST_ENTRY"]:
+            rows.append(("row", ("2 Distanza {} più vicini ({:.0f}%)".format(k_near, 100 * (1 - p["W_RHYTHM"])),
+                                 "{} → {}".format(fmt(far[f], 1, " m"), fmt(fd, 2)) if visible[f]
+                                 else "serve la palla", pts(nd, True), pts(dtot["dist"][f])),
+                         TEXT if visible[f] else DIM))
+        rows.append(("row", ("3 Frenata del ritmo ({:.0f}%)".format(100 * wr),
                              "{} ora, {}× i 4 s prima → {}".format(fmt(pspeed[f], 2, " m/s"),
                                                                  fmt(rhythm[f], 2), fmt(fr, 2)),
                              pts(nr, True), pts(dtot["rhythm"][f])), TEXT))
@@ -283,8 +312,6 @@ def main():
             wtxt, wnow = "nessuno nell'ultimo secondo", "--"
         rows.append(("row", ("4 Fischio (vale solo con frenata)", wtxt, wnow, pts(dtot["whistle"][f])),
                      TEXT if len(wk) else DIM))
-        if not visible[f]:
-            rows.append(("row", ("6 Palla non tracciata", "decidono solo gli altri parametri", "", ""), ACCENT))
         k = np.searchsorted(duel_frames, f + 1) - 1
         last_duel = (f - duel_frames[k]) / 25 if k >= 0 else np.inf
         last_off = [o for o in offs if 0 <= f - o[0] <= cause_s * 25 * 2]
@@ -295,12 +322,17 @@ def main():
                                                                (f - last_off[-1][0]) / 25), True
         elif last_duel <= cause_s:
             cause, ok = "contrasto vicino alla palla {:.1f} s fa".format(last_duel), True
+        elif cause_ok[f]:
+            # the machine looks back from CAUSE_S before the score started rising, not from now
+            cause, ok = "contrasto {:.1f} s fa, prima che il punteggio salisse".format(last_duel), True
         else:
             cause, ok = "nessun contrasto né fuorigioco", False
         pen = 0.0 if ok else float(z["no_cause_penalty"])
         rows.append(("row", ("7 Causa (se manca: −{:.2f})".format(float(z["no_cause_penalty"])), cause,
                              "" if ok else pts(-pen), "" if ok else pts(-pen)),
                      ACCENT if ok else TEXT))
+        rows += gap_rows(f)
+        rows.append(layout_row(f))
         rr = recent(d_reset, f)
         if rr:
             rows.append(("text", "Azzerato: " + reset_it[rr], ACCENT))
@@ -308,6 +340,46 @@ def main():
         rows[0] = ("head", ("SOGLIA PALLA MORTA", "{:.2f} / {:.2f}".format(sd - pen, thr_dead),
                             (sd - pen) / thr_dead), colour)
         return rows
+
+    def gap_rows(f):
+        """Rules 8 and 12 on the ball gap the frame is in (both decided on the whole gap)."""
+        k = int(np.searchsorted(gap_ab[:, 0], f + 1) - 1) if len(gap_ab) else -1
+        if k < 0 or f >= gap_ab[k, 1]:
+            note = "palla tracciata" if visible[f] else "buco sotto {:.0f} s".format(p["KEEP_MIN_S"])
+            return [("row", ("8 Buco lungo della palla", note, "", ""), DIM),
+                    ("row", ("12 Portiere con palla in mano", note, "", ""), DIM)]
+        a, b = gap_ab[k]
+        head = "{:.1f} s · giocatori {:.2f} m/s · ".format((b - a) / 25, gap_pace[k])
+        v8 = gap_r8[k]
+        sup = None
+        if v8.startswith("dead: "):
+            t8, c8 = "PALLA MORTA", ACCENT
+            sup = "   8 supporti: " + ", ".join(GAP8_IT.get(w, w) for w in v8[6:].split(", "))
+        else:
+            t8, c8 = GAP8_IT.get(v8, v8), TEXT
+        v12 = gap_r12[k]
+        out = [("row", ("8 Buco lungo della palla", head + t8, "", ""), c8)]
+        if sup:   # the list of supports can be long: on its own line(s), which have the whole width
+            words, line = sup.split(", "), ""
+            for wd in words:
+                if line and len(line) + len(wd) > 88:
+                    out.append(("text", line + ",", c8))
+                    line = "      " + wd
+                else:
+                    line = wd if not line else line + ", " + wd
+            out.append(("text", line, c8))
+        return out + [("row", ("12 Portiere con palla in mano", GAP12_IT.get(v12, v12), "", ""),
+                       ACCENT if v12 == "keeper" else TEXT)]
+
+    def layout_row(f):
+        """Rule 13: the layouts of a set piece the players are in (read without the ball)."""
+        on = [(name, strong) for name, arr, strong in lay if arr[f]]
+        if not on:
+            return ("row", ("13 Giocatori schierati", "nessuno schieramento", "", ""), DIM)
+        txt = ", ".join(name + ("" if strong else " (solo supporto alla 8)") for name, strong in on)
+        strong = any(st for _, st in on)
+        return ("row", ("13 Giocatori schierati", txt + (" → palla morta" if strong else ""), "", ""),
+                ACCENT if strong else TEXT)
 
     def restart_rows(f):
         sa = float(alive_score[f])
@@ -326,8 +398,10 @@ def main():
         alive = max(0.0, 1.0 - 2.0 * ex)
         on = visible[f] and np.nan_to_num(out_dist[f], nan=1) == 0
         rows.append(("row", ("Gioco vivo (giocatori ripartono)",
-                             "{} (lenti {}), dist. {} → indice {:.2f}".format(
+                             ("{} (lenti {}), dist. {} → indice {:.2f}".format(
                                  fmt(pspeed[f], 2, " m/s"), fmt(f_speed[f], 2), fmt(f_dist[f], 2), ex)
+                              if p["DIST_EXIT"] else "{} (lenti {}) → indice {:.2f}".format(
+                                 fmt(pspeed[f], 2, " m/s"), fmt(f_speed[f], 2), ex))
                              if on else ("palla fuori" if visible[f] else "palla non tracciata"),
                              pts(p["ALIVE_RATE"] * alive if on else 0, True), pts(atot["alive"][f])),
                      TEXT if alive > 0 and on else DIM))
@@ -350,10 +424,13 @@ def main():
     def panel_rows(f, owner):
         if owner == 2:
             rows = restart_rows(f)
+            if args.panel == "dead":
+                rows += gap_rows(f)
+                rows.append(layout_row(f))
         elif owner in (0, 1):
             chal = 1 - owner
             fp, fd = score[chal, f] / thr, dead_score[f] / thr_dead
-            if fd > fp:
+            if fd > fp or args.panel == "dead":
                 rows = dead_rows(f, DEAD_LINE)
                 rows.append(("text", "Altra soglia: cambio possesso → {} {:.2f} / {:.2f}".format(
                     names[chal], score[chal, f], thr), DIM))
@@ -436,7 +513,8 @@ def main():
             cb.text((TOP_W + TOP_W / 2, TOP_H / 2), "broadcast: nessun fotogramma sincronizzato",
                     font=font_panel, fill=DIM, anchor="mm")
         for k_, title in enumerate(("TATTICA", "BROADCAST sincronizzata",
-                                    "2D " + ("fuso tattica + broadcast" if args.tracking == "fused" else "tattica"))):
+                                    "2D " + {"fused": "fuso tattica + broadcast", "tactical_clean": "tattica, squadre riassegnate"}.get(
+                                        args.tracking, "tattica"))):
             cb.rectangle([k_ * TOP_W + 6, 6, k_ * TOP_W + 14 + font_panel.getlength(title), 30], fill=(0, 0, 0))
             cb.text((k_ * TOP_W + 10, 8), title, font=font_panel, fill=(255, 255, 255))
 
@@ -452,7 +530,8 @@ def main():
                 d.ellipse([bx - rp, by - rp, bx + rp, by + rp], outline=col, width=1)
             dd = np.linalg.norm(players[f] - ball[f], axis=1)
             dd = np.where(np.isnan(dd), np.inf, dd)
-            ring = set(int(s_) for s_ in np.argsort(dd)[:k_near] if np.isfinite(dd[s_]))
+            if p["DIST_ENTRY"] or p["DIST_EXIT"]:   # the K players of rule 2, when it is in use
+                ring = set(int(s_) for s_ in np.argsort(dd)[:k_near] if np.isfinite(dd[s_]))
             for team in (0, 1):
                 s_ = slot[team, f]
                 if s_ >= 0 and dist[team, f] < 15:
@@ -491,7 +570,8 @@ def main():
         line = "v2: " + state_of.get(lab, lab)
         if is_gt[f]:
             line += "   ·   GT: {}".format(gt_labels[f])
-        line += "   ·   baseline: {}".format(base[f])
+        if lab_ml is not None:
+            line += "   ·   modello: {}".format(lab_ml[f])
         c.text((TL_X, y0 + 18), line, font=font_mid, fill=TEXT)
         secs = f / 25
         c.text((TL_X, y0 + 64), "fotogramma video {}   ·   {:d}:{:05.2f} del video".format(
@@ -500,9 +580,11 @@ def main():
         # ---- strips and page chart -------------------------------------------------------
         page_start = ORIGIN + ((f - ORIGIN) // PAGE) * PAGE
         x0 = int((page_start - ORIGIN) * PX)
-        for k, (name, img) in enumerate((("Ground truth", gt_img),
-                                         ("v2 fuso" if args.tracking == "fused" else "v2 (nostro)", v2_img),
-                                         ("Baseline smooth50", base_img))):
+        strips = [("Ground truth", gt_img),
+                  ({"fused": "v2 fuso", "tactical_clean": "v2 squadre riass."}.get(args.tracking, "v2 (nostro)"), v2_img)]
+        if ml_img is not None:
+            strips.append(("Modello appreso", ml_img))
+        for k, (name, img) in enumerate(strips):
             c.text((30, y0 + 136 + 26 * k), name, font=font_small, fill=(170, 175, 185))
             canvas.paste(img.crop((x0, 0, x0 + TL_W, 16)), (TL_X, y0 + 140 + 26 * k))
         c.text((30, y0 + 222), "Punteggi", font=font_small, fill=(170, 175, 185))
@@ -562,6 +644,7 @@ def main():
         owner = int(live[f])
         rows = panel_rows(f, owner)
         y = zy
+        step = 22 if len(rows) <= 13 else (20 if len(rows) == 14 else (19 if len(rows) == 15 else 18))   # the full dead-ball panel: up to 16 rows
         for kind, cells, col in rows:
             if kind == "row":
                 for ci, txt in enumerate(cells[:2]):
@@ -589,7 +672,7 @@ def main():
                        fill=col, anchor="ra")
             else:
                 c.text((INFO_X, y), cells, font=font_bold if kind == "bold" else font_row, fill=col)
-            y += 22
+            y += step
 
         writer.stdin.write(canvas.tobytes())
         written += 1

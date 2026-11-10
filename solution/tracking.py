@@ -21,6 +21,9 @@ cache, so each fix can be measured alone or together; the plain sources load exa
     tactical_nofrozen  positions held still out of view (and motionless in view) set to NaN
     tactical_ball      ATD ball + the ball recovered in its gaps (BAR-ATH_ball_gapfill.npz)
     tactical_fixed     all of the above
+    tactical_reassigned  team of each stretch of track decided again from time and context
+                         (team_reassign.py: needs its model and `team_reassign.py apply`)
+    tactical_clean     tactical_reassigned + frozen positions removed
 """
 
 import os
@@ -69,7 +72,8 @@ def _parse(game, source="tactical"):
 
 DERIVED = {"tactical_keepers": ("keepers",), "tactical_teams": ("keepers", "teams"),
            "tactical_nofrozen": ("frozen",), "tactical_ball": ("ball",),
-           "tactical_fixed": ("keepers", "teams", "frozen", "ball")}
+           "tactical_fixed": ("keepers", "teams", "frozen", "ball"),
+           "tactical_reassigned": ("reassign",), "tactical_clean": ("reassign", "frozen")}
 
 
 def _derived(game, source):
@@ -82,6 +86,9 @@ def _derived(game, source):
     blocks = half_video_blocks(game)
     pitch = GAMES[game]["pitch"]
     base = players.shape[1]
+    if "reassign" in fixes:
+        import team_reassign
+        teams, players = team_reassign.cached(game, teams, players)
     if "keepers" in fixes:
         teams, players, _ = tf.fix_keepers(teams, players, ball, blocks, pitch)
     if "teams" in fixes:
