@@ -9,6 +9,13 @@ challenge's own scorer (evaluation/possession_metrics.evaluate) run on those gam
     .venv/bin/python solution/calibrate.py sweep --only V_SLOW,R_FAR
     .venv/bin/python solution/calibrate.py ablate                   # each rule switched off
     .venv/bin/python solution/calibrate.py tracking                 # clean / degraded / fixed players
+    .venv/bin/python solution/calibrate.py baseline --games idsse   # the 7 IDSSE Bundesliga matches
+    .venv/bin/python solution/calibrate.py ablate --games all       # Metrica and IDSSE together
+
+--games idsse uses solution/external/idsse.py (TRACAB tracking, D from its ball-alive flag, team
+from the DFL events; --labels events|tracab for the other label variants). There "degraded" means
+players AND ball degraded (external/degrade.py degrade + degrade_ball: TRACAB sees the ball almost
+always, BAR-ATH does not); "players" degrades the players only.
 
 Scores are on DEGRADED tracking by default (external/degrade.py): the Metrica players are perfect,
 BAR-ATH's are not, and parameters must suit the tracking we are actually scored on.
@@ -33,6 +40,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "external"))
 import clean_tracking  # noqa: E402
 import degrade  # noqa: E402
+import idsse  # noqa: E402
 import metrica  # noqa: E402
 import possession_metrics as pm  # noqa: E402
 import possession_v2 as v2  # noqa: E402
@@ -44,20 +52,67 @@ TRACKING = "degraded"   # clean | degraded | fixed (degraded, then clean_trackin
 
 SEEDS = (1, 2)          # two degraded copies of every game: 6 runs per variant
 RUNS = tuple((g, s) for g in metrica.GAMES for s in SEEDS)
+IDSSE_RUNS = tuple((g, s) for g in idsse.GAMES for s in SEEDS)
+GAME_SETS = {"metrica": RUNS, "idsse": IDSSE_RUNS, "all": RUNS + IDSSE_RUNS}
+LABELS = "flag"         # IDSSE label variant (idsse.labels); Metrica has only one
+_IDSSE_CACHE_MAX = 3    # IDSSE cases are large: keep a few per process
 
 
-def case(run, variant=None):
+def pitch_of(run):
+    return metrica.PITCH if run[0] in metrica.GAMES else idsse.pitch(run[0])
+
+
+def _idsse_ball(game, seed, teams, players, ball, blocks):
+    """degrade.degrade_ball, cached on disk (the fit takes a few seconds)."""
+    path = os.path.join(ROOT, "data", "derived", "idsse_{}_ball{}.npz".format(game, seed))
+    if os.path.exists(path):
+        return np.load(path)["ball"]
+    out, _ = degrade.degrade_ball(ball, players, blocks, idsse.pitch(game), seed=seed)
+    np.savez_compressed(path, ball=out)
+    return out
+
+
+def _idsse_case(run, variant, labels):
+    game, seed = run
+    teams, players, ball, ball_speed, _ = idsse.load(game)
+    lab = idsse.labels(game, labels)
+    blocks = idsse.blocks_from_labels(lab)
+    if variant in ("degraded", "players", "fixed", "realistic"):
+        s = 100 + 10 * idsse.GAMES.index(game) + seed
+        teams, players = degrade.degrade(teams, players, seed=s)
+        if variant in ("degraded", "fixed", "realistic"):
+            ball = _idsse_ball(game, s, teams, players, ball, blocks)
+        if variant == "realistic":  # + BAR-ATH's ball shape (degrade.shape_ball)
+            ball = degrade.shape_ball(ball, seed=s)
+            ball_speed = np.full(len(ball), np.nan, np.float32)
+    if variant == "fixed":
+        teams, players, _ = clean_tracking.fix_team_swaps(teams, players)
+    return teams, players, ball, ball_speed, blocks, pm.label_codes(lab)
+
+
+def case(run, variant=None, labels=None):
     """(tracking arrays, graded blocks, GT codes) for one (game, seed) run, cached per process.
 
     degraded: players made BAR-ATH-like by external/degrade.py, the default, because BAR-ATH's
     tracking is the one we are scored on. fixed: the same, then cleaned. clean ignores the seed."""
     variant = variant or TRACKING
     game, seed = run
+    if game in idsse.GAMES:
+        key = (run, variant, labels or LABELS)
+        if key not in _CASES:
+            idss = [k for k in _CASES if k[0][0] in idsse.GAMES]
+            for k in idss[:max(0, len(idss) - _IDSSE_CACHE_MAX + 1)]:
+                del _CASES[k]
+            _CASES[key] = _idsse_case(run, variant, labels or LABELS)
+        return _CASES[key]
     if (run, variant) not in _CASES:
         teams, players, ball, ball_speed, periods = metrica.load(game)
         lab = metrica.labels(game, len(ball), periods)
-        if variant in ("degraded", "fixed"):
+        if variant in ("degraded", "fixed", "realistic"):
             teams, players = degrade.degrade(teams, players, seed=10 * game + seed)
+        if variant == "realistic":  # + BAR-ATH's ball shape (degrade.shape_ball)
+            ball = degrade.shape_ball(ball, seed=10 * game + seed)
+            ball_speed = np.full(len(ball), np.nan, np.float32)
         if variant == "fixed":
             teams, players, _ = clean_tracking.fix_team_swaps(teams, players)
         _CASES[(run, variant)] = (teams, players, ball, ball_speed,
@@ -66,8 +121,8 @@ def case(run, variant=None):
 
 
 def score(run, params):
-    teams, players, ball, ball_speed, blocks, gt = case(run, params.get("_tracking"))
-    labels, _, _ = v2.predict(teams, players, ball, ball_speed, blocks, metrica.PITCH, params)
+    teams, players, ball, ball_speed, blocks, gt = case(run, params.get("_tracking"), params.get("_labels"))
+    labels, _, _ = v2.predict(teams, players, ball, ball_speed, blocks, pitch_of(run), params)
     r = pm.evaluate(gt, pm.label_codes(labels), bootstrap_n=0)
     return {k: r[k] for k in KEYS}
 
@@ -144,24 +199,31 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=("baseline", "sweep", "ablate", "tracking"))
     ap.add_argument("--only", help="comma-separated parameter names for sweep")
+    ap.add_argument("--games", choices=tuple(GAME_SETS), default="metrica",
+                    help="calibration games: metrica (default), idsse or all")
+    ap.add_argument("--labels", choices=("flag", "events", "tracab"), default="flag",
+                    help="IDSSE label variant (see external/idsse.py)")
     a = ap.parse_args()
+    games = GAME_SETS[a.games]
+    extra = {} if a.labels == "flag" else {"_labels": a.labels}
 
-    base = run_all([("current PARAMS", dict(v2.PARAMS))])["current PARAMS"]
+    base = run_all([("current PARAMS", {**v2.PARAMS, **extra})], games)["current PARAMS"]
     txt, ref = row("current PARAMS", base)
     print(txt)
     if a.mode == "baseline":
         return
     if a.mode == "tracking":
-        variants = [(v, {**v2.PARAMS, "_tracking": v}) for v in ("clean", "degraded", "fixed")]
-        res = run_all(variants)
+        names = ("clean", "degraded", "fixed") + (("players",) if a.games != "metrica" else ())
+        variants = [(v, {**v2.PARAMS, **extra, "_tracking": v}) for v in names]
+        res = run_all(variants, games)
         for name, _ in variants:
             print(row("tracking " + name, res[name], ref)[0])
         return
     if a.mode == "sweep":
-        variants = sweep_variants(a.only.split(",") if a.only else None)
+        variants = [(k, {**p, **extra}) for k, p in sweep_variants(a.only.split(",") if a.only else None)]
     else:
-        variants = [(name, {**v2.PARAMS, **ch}) for name, ch in ABLATIONS.items()]
-    res = run_all(variants)
+        variants = [(name, {**v2.PARAMS, **extra, **ch}) for name, ch in ABLATIONS.items()]
+    res = run_all(variants, games)
     lines = [row(name, res[name], ref) for name, _ in variants]
     for txt, _ in lines:
         print(txt, flush=True)

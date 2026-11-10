@@ -13,6 +13,14 @@ the same index as a submission row; the broadcast has its own timeline (see sync
 
 source="fused" loads the tactical timeline with the broadcast merged in (fusion.py), with extra
 player slots for players only the broadcast sees.
+
+Optional derived sources (track_fixes.py, retrack/ball_gaps.py), built in memory from the tactical
+cache, so each fix can be measured alone or together; the plain sources load exactly as before:
+    tactical_keepers   keepers carried by the wrong team moved back (track_fixes.fix_keepers)
+    tactical_teams     fix_keepers + clean_tracking.fix_team_swaps (slots compacted to 2 x 46)
+    tactical_nofrozen  positions held still out of view (and motionless in view) set to NaN
+    tactical_ball      ATD ball + the ball recovered in its gaps (BAR-ATH_ball_gapfill.npz)
+    tactical_fixed     all of the above
 """
 
 import os
@@ -59,8 +67,48 @@ def _parse(game, source="tactical"):
     return teams, players, ball, ball_speed
 
 
+DERIVED = {"tactical_keepers": ("keepers",), "tactical_teams": ("keepers", "teams"),
+           "tactical_nofrozen": ("frozen",), "tactical_ball": ("ball",),
+           "tactical_fixed": ("keepers", "teams", "frozen", "ball")}
+
+
+def _derived(game, source):
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import track_fixes as tf
+    from games import asset_paths, half_video_blocks
+    teams, players, ball, ball_speed, names = load(game, "tactical")
+    fixes = DERIVED[source]
+    blocks = half_video_blocks(game)
+    pitch = GAMES[game]["pitch"]
+    base = players.shape[1]
+    if "keepers" in fixes:
+        teams, players, _ = tf.fix_keepers(teams, players, ball, blocks, pitch)
+    if "teams" in fixes:
+        import clean_tracking
+        teams, players, _ = clean_tracking.fix_team_swaps(teams, players)
+        teams, players = tf.compact(teams, players, base)
+    if "frozen" in fixes:
+        H = np.loadtxt(asset_paths(game)["homography"], delimiter=",", skiprows=1,
+                       usecols=range(1, 10)).reshape(-1, 3, 3)
+        players, _ = tf.drop_frozen(players, H, pitch, held_in_view=True)
+    if "ball" in fixes:
+        path = os.path.join(CACHE_DIR, "retrack", "{}_ball_gapfill.npz".format(game))
+        if not os.path.exists(path):
+            raise FileNotFoundError("{} missing: run solution/retrack/ball_gaps.py detect, then filter".format(path))
+        z = np.load(path)
+        rec = z["recovered"]
+        ball = ball.copy()
+        ball[rec] = z["ball"][rec]
+        ball_speed = ball_speed.copy()
+        ball_speed[rec] = np.nan       # no ATD speed there: v1 measures it from the positions
+    return teams, players, ball, ball_speed, names
+
+
 def load(game=GAME, source="tactical"):
     """(teams, players, ball, ball_speed, (home_name, away_name)), from the cache when present."""
+    if source in DERIVED:
+        return _derived(game, source)
     path = os.path.join(CACHE_DIR, "{}_{}_tracking.npz".format(game, source))
     meta_path = require(["atd_meta"], game)[0]
     names = team_names(meta_path)

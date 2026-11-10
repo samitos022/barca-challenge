@@ -55,6 +55,10 @@ Entering the dead ball (H/A -> D)
      centre, goal line) 39% of the time against 13% for a random frame. On the external games a
      long gap is a dead ball 93-98% of the time, and its ends match the stoppage's to the frame
      (stronger than BAR-ATH: the speed condition is there not to trust the gap alone).
+     With the broadcast (--tracking fused) one more support: the broadcast not live (a cut to a
+     close-up, a replay, another angle) for at least CUT_SHARE of the gap. Measured without
+     labels: the broadcast is not live on 7% of surely alive frames (ball and players fast), 51%
+     of the frames 3-10 s after a ball out and 74% of the frames inside rule 8's gaps.
 
   9. Restart dated to the ball's first movement.  However a restart is confirmed (restart touch,
      alive-play score, ball back after a gap), it is dated to the moment the ball, after being slow
@@ -110,6 +114,7 @@ from baseline import write_submission  # noqa: E402
 import clean_tracking  # noqa: E402
 import possession_v1 as v1  # noqa: E402
 import tracking  # noqa: E402
+import sync_broadcast  # noqa: E402
 import whistle  # noqa: E402
 
 FPS = 25
@@ -123,6 +128,14 @@ def outputs(source="tactical", use_whistle=True):
 
 PARAMS = dict(v1.PARAMS)
 PARAMS.update({
+    # v1 reaches widened by the ATD ball's position error: at a velocity change BAR-ATH's ball is
+    # 1.46 m (median) from the nearest player, TRACAB's 0.57 m (analisi/ritardo_palla.py), so the
+    # v1 radii, set for a precise ball, are about 1 m short. Measured on the external games with
+    # BAR-ATH's ball shape (calibrate "realistic"): +0.015 / +0.033 spellF1 on IDSSE flag / tracab
+    # labels (6/7 and 7/7 games up), neutral on Metrica; +0.75 and +1.25 m give the same.
+    "R_NEAR": 2.0,          # m (v1: 1.0)
+    "R_FAR": 3.5,           # m (v1: 2.5)
+    "R_TOUCH": 3.0,         # m (v1: 2.0)
     # 1, ball out
     "OUT_MARGIN": 1.0,      # m beyond the line: tracking noise plus the ball's radius
     "OUT_MIN_FRAMES": 3,    # frames: one stray detection outside is not a ball out
@@ -164,6 +177,8 @@ PARAMS.update({
     "GAP_RULE": 1,          # 0 switches rule 8 off (ablation)
     "GAP_SUPPORT": 1,       # 1: a long gap is a dead ball only with another signal (see rule 8)
     "GAP_SUPPORT_S": 2.0,   # s around the start of the gap where braking / whistle are looked for
+    "CUT_SHARE": 0.5,       # rule 8 support: broadcast not live for this share of the gap (only
+                            # when a broadcast_cut array is given, i.e. with --tracking fused)
     # 9, restart dated to the ball's first movement
     "RESTART_MOVE": 1,      # 0 switches it off (ablation)
     "STILL_S": 0.5,         # s the ball must have been slow (under V_MOVE) before it moves off
@@ -171,10 +186,16 @@ PARAMS.update({
                             # A ball "lying still" is not still in this tracking: while it is placed
                             # or held it reads 1-2.5 m/s, so slow means under V_MOVE
     "MOVE_BACK_S": 3.0,     # s: the movement must be at most this long before the confirmation
+    "MOVE_LAST": 1,         # 1: date at the last frame within MOVE_EPS of the slowest (see rule 9)
+    "MOVE_EPS": 0.5,        # m/s: speeds this close to the minimum count as "still"
     # 10, lightning touch: a possession starts at the interception that began it
     "LIGHTNING": 1,         # 0 switches it off (ablation)
     "LIGHT_ANGLE": 60.0,    # deg: the ball's direction changes completely
     "LIGHT_BACK_S": 4.0,    # s: the touch must be at most this long before the change is decided
+    # 11, touch sequence: two touches in a row by the team without the ball
+    "SEQ_RULE": 1,          # 0 switches it off (ablation)
+    "SEQ_MIN_S": 0.4,       # s: closer than this two touches are one contact seen twice
+    "SEQ_S": 3.0,           # s: "keeps the ball for a few seconds" (CHALLENGE.md)
     "W_RHYTHM": 0.6,        # share of rule 3 (braking) in the deadness; rule 2 (distance) the rest
     "THRESHOLD_DEAD": 1.0,
     # 4, whistle
@@ -441,6 +462,7 @@ def decide(f, blocks, n, p):
     move_back = int(p["MOVE_BACK_S"] * FPS)
     lightning = f["lightning"].tolist()
     light_back = int(p["LIGHT_BACK_S"] * FPS)
+    seq_min, seq_max = int(p["SEQ_MIN_S"] * FPS), int(p["SEQ_S"] * FPS)
 
     def restart_date(t, fallback, dead_since, kickoff):
         """Rule 9: the ball's first movement after lying still, if recent and inside the stoppage
@@ -498,6 +520,7 @@ def decide(f, blocks, n, p):
         last_change = first
         kickoff = True  # the first restart of a half is the kick-off, from the centre spot
         last_light = [-10 ** 9, -10 ** 9]  # last lightning touch of each team
+        seq_first = [-1, -1]                # first touch of each challenger's current touch run
         last_own_ev = first                 # last touch / clear control of the team in possession
 
         def change(t, start, new, reason):
@@ -687,7 +710,19 @@ def decide(f, blocks, n, p):
                 s[c] = new
                 score[c, t] = new
             winner = HOME if s[HOME] >= thr else (AWAY if s[AWAY] >= thr else NONE)
-            if winner != NONE:
+            seq_start = -1
+            if p["SEQ_RULE"] and touch[t] in (HOME, AWAY) and touch[t] != owner and owner in (HOME, AWAY):
+                c = int(touch[t])
+                f0 = seq_first[c]
+                if f0 > max(last_own_ev, last_change) and seq_min <= t - f0 <= seq_max:
+                    winner, seq_start = c, f0
+                elif f0 <= max(last_own_ev, last_change) or t - f0 > seq_max:
+                    seq_first[c] = t
+            if winner != NONE and seq_start >= 0 and s[winner] < thr:
+                seq_first = [-1, -1]
+                change(t, seq_start, winner, "touch sequence")
+            elif winner != NONE:
+                seq_first = [-1, -1]
                 start = onset[winner]
                 prev = f["prev_seen"][start]
                 if start - prev > p["GAP_MIN"] and prev >= first:
@@ -742,7 +777,7 @@ def whistle_points(events, f_rhythm, n, p):
 
 
 def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, whistle_events=(),
-                     whistle_level=None):
+                     whistle_level=None, broadcast_cut=None):
     """Every per-frame feature the state machine reads, plus the ones the review video shows.
 
     Pure function of the arrays: no file is read, so the same code runs on any game (the BAR-ATH
@@ -834,6 +869,8 @@ def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, 
                     why.append("players far from the ball")
                 if whistle_pts[lo:hi].max() > 0:
                     why.append("whistle")
+                if broadcast_cut is not None and broadcast_cut[a:b].mean() >= p["CUT_SHARE"]:
+                    why.append("broadcast cut away")
                 if not why:
                     continue
             gap_dead_start[a], gap_dead_end[b] = True, True
@@ -848,7 +885,15 @@ def compute_features(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, 
         cross = np.flatnonzero(slow_run[:-1] & (np.nan_to_num(sp[1:], nan=0.0) >= p["V_MOVE"])) + 1
         for c in cross:
             lo = max(0, c - FPS)
-            k = lo + int(np.nanargmin(sp[lo:c]))  # the ball at its slowest before moving off
+            w = sp[lo:c]
+            if p["MOVE_LAST"]:
+                # the LAST frame still at the minimum: a ball lying perfectly still (clean
+                # tracking) ties for the whole second, and the first of the tie dated the
+                # restart a second early
+                near_min = np.flatnonzero(np.nan_to_num(w, nan=np.inf) <= np.nanmin(w) + p["MOVE_EPS"])
+                k = lo + int(near_min[-1])
+            else:
+                k = lo + int(np.nanargmin(w))  # the ball at its slowest before moving off
             move_onset[k] = k
         move_onset = np.maximum.accumulate(move_onset)
 
@@ -889,11 +934,11 @@ def to_labels(state, blocks, n):
 
 
 def predict(teams, players, ball, ball_speed, blocks, pitch, p=PARAMS, whistle_events=(),
-            whistle_level=None):
+            whistle_level=None, broadcast_cut=None):
     """Labels for every frame, plus features and machine outputs (for diagnostics)."""
     n = len(ball)
     f = compute_features(teams, players, ball, ball_speed, blocks, pitch, p, whistle_events,
-                         whistle_level)
+                         whistle_level, broadcast_cut)
     state, live, score, dead_score, alive_score, changes, refused, bd = decide(f, blocks, n, p)
     out = {"state": state, "live": live, "score": score, "dead_score": dead_score,
            "alive_score": alive_score, "changes": changes, "refused": refused, "breakdown": bd}
@@ -966,8 +1011,12 @@ def main(source="tactical", use_whistle=True, fix_teams=False):
     blocks = half_video_blocks(GAME)
     pitch = GAMES[GAME]["pitch"]
     events, level = whistle.load(GAME) if use_whistle else ((), None)
+    cut = None
+    if source == "fused":  # the broadcast is in use: its cuts away from live play support rule 8
+        sync = np.load(sync_broadcast.OUT)
+        cut = (sync["b_of_t"] >= 0) & (sync["b_live"] < 0)
 
-    labels, f, r = predict(teams, players, ball, ball_speed, blocks, pitch, p, events, level)
+    labels, f, r = predict(teams, players, ball, ball_speed, blocks, pitch, p, events, level, cut)
     write_submission(out_csv, labels)
     save_diagnostics(out_diag, f, r, p)
     print_summary(labels, f, r, blocks, names)

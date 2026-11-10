@@ -7,7 +7,17 @@ On every tactical frame with a LIVE broadcast frame synchronised to it:
     he is; a broadcast player with no partner is added in an extra slot, after the 46 tactical
     ones, only if he is farther than GHOST_R from every tactical player of either team: closer
     than that he is almost always a double of a player the tactical camera already tracks.
-  - ball: seen by both, the weighted mean; seen by one, that one; seen by none, missing.
+  - ball (BALL_MODE "fill", the default): the tactical ball wherever the tactical camera sees it;
+    where only the broadcast sees it, the broadcast ball shifted by the offset between the two
+    cameras measured on the nearest frames both see it (within OFFSET_S, interpolated between
+    the one before and the one after), so the track does not jump when the source changes.
+    Measured without labels: the offset is a slow bias (3 cm from one frame to the next, 0.5 m
+    over a second), and where the cameras are more than 2 m apart (a quarter of the frames both
+    see) the gap grows and shrinks smoothly over about a second with both tracks smooth and the
+    ball faster: a ball in the air, which each camera projects onto the ground from its own point
+    of view. Neither is wrong, so there is nothing to average. The weighted mean (BALL_MODE
+    "mean", the first version) made the ball jump 0.8 m (median) every time the source changed,
+    which the touch detector read as touches: +24% touches and +8% possessions on the match.
 Elsewhere (replays, close-ups, cuts, halftime) the tactical tracking is kept unchanged.
 
 Writes data/derived/<game>_fused_tracking.npz in the same shape tracking.load() returns, so any
@@ -37,6 +47,10 @@ GHOST_R = 3.0        # m: a broadcast-only player this close to ANY tactical pla
                      # double (a tactical player the pairing missed, or on the other team's
                      # side of a mix-up) and is not added
 
+BALL_MODE = "fill"   # "fill": tactical ball, broadcast only in its gaps, offset-corrected;
+                     # "mean": weighted mean where both see it (first version, kept for comparison)
+OFFSET_S = 1.0       # s: a both-seen frame this close gives the offset for a broadcast-only frame
+
 BALL_NONE, BALL_TACTICAL, BALL_BROADCAST, BALL_BOTH = 0, 1, 2, 3
 
 
@@ -59,7 +73,34 @@ def pair(a, b, r):
     return out
 
 
-def main():
+def shift_broadcast_only(ball, ball_src, b_off, max_back):
+    """Move every run of broadcast-only balls by the camera offset measured at its two ends (the
+    nearest both-seen frame at most max_back frames before its first frame and after its last),
+    linear in time between the two, constant if only one end has it, unshifted if neither."""
+    n = len(ball)
+    has = ~np.isnan(b_off[:, 0])
+    idx = np.arange(n)
+    prev = np.maximum.accumulate(np.where(has, idx, -1))
+    nxt = np.minimum.accumulate(np.where(has, idx, n)[::-1])[::-1]
+    e = np.flatnonzero(np.diff(np.concatenate(([0], (ball_src == BALL_BROADCAST).astype(np.int8), [0]))))
+    shifted = 0
+    for s0, e0 in zip(e[::2], e[1::2]):  # run s0 .. e0 - 1
+        p, q = prev[s0], nxt[e0 - 1]
+        p_ok, q_ok = p >= 0 and s0 - p <= max_back, q < n and q - (e0 - 1) <= max_back
+        if not (p_ok or q_ok):
+            continue
+        t = np.arange(s0, e0)
+        if p_ok and q_ok:
+            a = ((t - p) / (q - p))[:, None]
+            off = (1 - a) * b_off[p] + a * b_off[q]
+        else:
+            off = np.broadcast_to(b_off[p if p_ok else q], (len(t), 2))
+        ball[s0:e0] -= off
+        shifted += e0 - s0
+    return shifted
+
+
+def main(ball_mode=BALL_MODE):
     t_teams, t_pl, t_ball, t_bs, names = tracking.load(GAME)
     b_teams, b_pl, b_ball, b_bs, _ = tracking.load(GAME, "broadcast")
     sync = np.load(sync_broadcast.OUT)
@@ -76,6 +117,7 @@ def main():
     paired = np.zeros(n, np.int16)
     added = np.zeros(n, np.int16)
     ball_gap = np.full(n, np.nan, np.float32)  # distance between the two balls when both are seen
+    b_off = np.full((n, 2), np.nan, np.float32)  # broadcast - tactical ball when both are seen
 
     w = W_TACTICAL
     ghosts = np.zeros(n, np.int16)
@@ -103,14 +145,19 @@ def main():
         bv = not np.isnan(b_ball[b, 0])
         if bv and t_vis[t]:
             ball_gap[t] = np.linalg.norm(t_ball[t] - b_ball[b])
-            ball[t] = w * t_ball[t] + (1 - w) * b_ball[b]
-            if np.isfinite(t_bs[t]) and np.isfinite(b_bs[b]):
-                ball_speed[t] = w * t_bs[t] + (1 - w) * b_bs[b]
+            b_off[t] = b_ball[b] - t_ball[t]
+            if ball_mode == "mean":
+                ball[t] = w * t_ball[t] + (1 - w) * b_ball[b]
+                if np.isfinite(t_bs[t]) and np.isfinite(b_bs[b]):
+                    ball_speed[t] = w * t_bs[t] + (1 - w) * b_bs[b]
             ball_src[t] = BALL_BOTH
         elif bv:
             ball[t] = b_ball[b]
             ball_speed[t] = b_bs[b]
             ball_src[t] = BALL_BROADCAST
+
+    shifted = shift_broadcast_only(ball, ball_src, b_off, int(OFFSET_S * 25)) \
+        if ball_mode == "fill" else 0
 
     np.savez(OUT, teams=teams, players=players, ball=ball, ball_speed=ball_speed,
              ball_src=ball_src, paired=paired, added=added, ball_gap=ball_gap)
@@ -131,8 +178,21 @@ def main():
     lg = g & live
     print("on live frames: {:.1f} player pairs merged, {:.2f} broadcast-only players added, {:.2f} ghost "
           "doubles dropped (mean per frame)".format(paired[lg].mean(), added[lg].mean(), ghosts[lg].mean()))
+    if ball_mode == "fill":
+        bo = g & (ball_src == BALL_BROADCAST)
+        print("ball mode fill: broadcast-only frames shifted by the camera offset {:.0f}%".format(
+            100 * shifted / max(int((ball_src == BALL_BROADCAST).sum()), 1)))
+        step = np.linalg.norm(np.diff(ball, axis=0), axis=1)
+        sw = (ball_src[1:] != ball_src[:-1]) & (ball_src[1:] > 0) & (ball_src[:-1] > 0) & g[1:]
+        print("ball jump where the source changes: median {:.2f} m, p90 {:.2f} m ({} changes, {} "
+              "graded broadcast-only frames)".format(np.nanmedian(step[sw]), np.nanpercentile(step[sw], 90),
+                                                     int(sw.sum()), int(bo.sum())))
     print("-> {}".format(os.path.relpath(OUT, ROOT)))
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ball", choices=("fill", "mean"), default=BALL_MODE,
+                    help="fill (default): tactical ball, broadcast only in its gaps; mean: 75/25 mean")
+    main(ap.parse_args().ball)
