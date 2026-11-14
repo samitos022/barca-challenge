@@ -1,11 +1,32 @@
-# Starting evaluation dependencies verified locally on Python 3.12.3.
-# Final submission must also pin all transitive and additional dependencies.
-numpy==1.26.4
-pandas==2.1.4
-pillow==10.4.0  # viz/
-
-# Learnt models (solution/possession_ml.py, solution/team_reassign.py). Not pinned yet: developed
-# with scikit-learn 1.9 on Python 3.14; pin and test before the final submission.
-scikit-learn
-# Only to download the PFF World Cup 2022 open data (solution/external/pff.py --download).
-gdown
+# Exact environment that produced the submission: Python 3.14.4, macOS 26 arm64 (13/11/2026).
+# Every package pinned, transitive ones included (pip freeze of .venv). ffmpeg is also needed (whistle).
+beautifulsoup4==4.15.0
+certifi==2026.10.23
+charset-normalizer==3.5.2
+cloudpickle==3.1.2
+contourpy==1.4.0
+cycler==0.12.1
+filelock==4.2.10
+fonttools==4.68.0
+gdown==6.5.1
+idna==3.20
+joblib==1.6.0
+kiwisolver==1.5.1
+matplotlib==3.11.2
+narwhals==2.28.0
+numpy==2.5.4
+packaging==26.3
+pandas==3.1.1
+pillow==13.0.0
+pyparsing==3.3.3
+PySocks==1.7.1
+python-dateutil==4.0.0
+requests==2.34.2
+scikit-learn==1.9.1
+scipy==1.18.1
+soupsieve==4.1
+threadpoolctl==3.8.0
+tqdm==4.70.1
+typing_extensions==4.16.0
+tzdata==2026.6
+urllib3==2.8.0

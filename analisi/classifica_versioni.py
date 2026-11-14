@@ -46,7 +46,8 @@ def main():
     first = pickle.load(open(os.path.join(D, "possession_ml3_primo.pkl"), "rb"))
     moved = pickle.load(open(os.path.join(D, "possession_ml3_senza_skillcorner.pkl"), "rb"))
     nt = len(team["names"])
-    assert names[:nt] == team["names"] and names[:len(first["names"])] == first["names"] and names == moved["names"]
+    km = len(moved["names"])     # features3 grew the keeper block (12/11) after this model
+    assert names[:nt] == team["names"] and names[:len(first["names"])] == first["names"] and names[:km] == moved["names"]
     res = {}
     for game, X3, _, gt, codes, old, blocks in data:
         out = {"v2 of this morning": old, "v2 now": codes}
@@ -54,7 +55,7 @@ def main():
         out["v2 + learnt team"] = ml.decode(ph, codes, team["switch_cost"])
         k = len(first["names"])
         out["three states, first"] = ml.decode3(ml.prob3(first["clf"], X3[:, :k], first["names"]), blocks, first["cost_team"], first["cost_dead"])
-        out["three states + moved ball"] = ml.decode3(ml.prob3(moved["clf"], X3, names), blocks, moved["cost_team"], moved["cost_dead"])
+        out["three states + moved ball"] = ml.decode3(ml.prob3(moved["clf"], X3[:, :km], moved["names"]), blocks, moved["cost_team"], moved["cost_dead"])
         for k_, c in out.items():
             e = pm.evaluate(gt, c, bootstrap_n=0)
             res.setdefault(k_, []).append((game, e["spell_f1_mean"], e["macro_f1"], float(np.mean(c[gt != 3] == gt[gt != 3]))))

@@ -28,6 +28,7 @@ and their labels are a silver standard, so differences under ~0.02 spellF1 are n
 import argparse
 import os
 import sys
+import zlib
 from multiprocessing import Pool
 
 import numpy as np
@@ -123,25 +124,48 @@ def case(run, variant=None, labels=None):
     tracking is the one we are scored on. fixed: the same, then cleaned. clean ignores the seed."""
     variant = variant or TRACKING
     game, seed = run
+    if variant == "view":
+        # realistic (SkillCorner / PFF: their own tracking) + only what BAR-ATH's tactical camera
+        # would show (degrade.camera_view, 12/11)
+        vkey = (run, "view", labels or LABELS)
+        if vkey not in _CASES:
+            teams, players, ball, ball_speed, blocks, gt = case(run, "realistic", labels)
+            players, ball = degrade.camera_view(players, ball, pitch_of(run), seed=9000 + zlib.crc32(str(game).encode()) % 997 * 10 + seed)
+            _CASES[vkey] = (teams, players, ball, ball_speed, blocks, gt)
+        return _CASES[vkey]
     if game in pff.GAMES:
         # PFF World Cup 2022 (broadcast tracking, as it is). "moved": the ball, which PFF does not
         # give during a stoppage, carried to the restart spot (degrade.move_dead_ball), as for Metrica.
-        v = "moved" if variant == "moved" else "native"
+        # "keeper": the ball removed while a goalkeeper holds it (degrade.hide_keeper_holds), as
+        # BAR-ATH's tracker loses it in his hands.
+        v = variant if variant in ("moved", "keeper") else "native"
         if (run, v) not in _CASES:
             for k in [k for k in _CASES if k[0][0] in pff.GAMES][:-2]:
                 del _CASES[k]
             teams, players, ball, ball_speed, _ = pff.load(game)
             lab = pff.labels(game)
+            gt = pm.label_codes(lab)
+            blocks = pff.blocks_from_labels(lab)
             if v == "moved":
-                ball = degrade.move_dead_ball(ball, players, pm.label_codes(lab), seed=7000 + int(game) % 1000 + seed).astype(ball.dtype)
-            _CASES[(run, v)] = (teams, players, ball, ball_speed, pff.blocks_from_labels(lab), pm.label_codes(lab))
+                ball = degrade.move_dead_ball(ball, players, gt, seed=7000 + int(game) % 1000 + seed).astype(ball.dtype)
+            elif v == "keeper":
+                holds = degrade.keeper_holds(teams, players, ball, gt, blocks, pff.pitch(game))
+                ball, _ = degrade.hide_keeper_holds(ball, holds, seed=7000 + int(game) % 1000 + seed)
+            _CASES[(run, v)] = (teams, players, ball, ball_speed, blocks, gt)
         return _CASES[(run, v)]
     if game in skillcorner.GAMES:
-        if (run, "native") not in _CASES:
+        v = "keeper" if variant == "keeper" else "native"
+        if (run, v) not in _CASES:
             for k in [k for k in _CASES if k[0][0] in skillcorner.GAMES][:-2]:
                 del _CASES[k]
-            _CASES[(run, "native")] = _skill_case(run)
-        return _CASES[(run, "native")]
+            c = _skill_case(run)
+            if v == "keeper":
+                teams, players, ball, ball_speed, blocks, gt = c
+                holds = degrade.keeper_holds(teams, players, ball, gt, blocks, skillcorner.pitch(game))
+                ball, _ = degrade.hide_keeper_holds(ball, holds, seed=8000 + int(game) % 1000 + seed)
+                c = (teams, players, ball, ball_speed, blocks, gt)
+            _CASES[(run, v)] = c
+        return _CASES[(run, v)]
     if game in idsse.GAMES:
         key = (run, variant, labels or LABELS)
         if key not in _CASES:
@@ -150,16 +174,17 @@ def case(run, variant=None, labels=None):
                 del _CASES[k]
             _CASES[key] = _idsse_case(run, variant, labels or LABELS)
         return _CASES[key]
-    if variant == "keeper":
-        raise ValueError("the keeper condition is for IDSSE only: Metrica's ball is already missing in its stoppages")
     if (run, variant) not in _CASES:
         teams, players, ball, ball_speed, periods = metrica.load(game)
         lab = metrica.labels(game, len(ball), periods)
         if variant == "moved":  # Metrica's ball is missing in the stoppages: here it is carried to the spot
             ball = degrade.move_dead_ball(ball, players, pm.label_codes(lab), seed=10 * game + seed).astype(ball.dtype)
-        if variant in ("degraded", "fixed", "realistic", "moved"):
+        if variant == "keeper":  # the ball removed while a goalkeeper holds it, found on the clean tracking
+            holds = degrade.keeper_holds(teams, players, ball, pm.label_codes(lab), metrica.blocks_from_labels(lab), metrica.PITCH)
+            ball, _ = degrade.hide_keeper_holds(ball, holds, seed=10 * game + seed)
+        if variant in ("degraded", "fixed", "realistic", "moved", "keeper"):
             teams, players = degrade.degrade(teams, players, seed=10 * game + seed)
-        if variant in ("realistic", "moved"):  # + BAR-ATH's ball shape (degrade.shape_ball)
+        if variant in ("realistic", "moved", "keeper"):  # + BAR-ATH's ball shape (degrade.shape_ball)
             ball = degrade.shape_ball(ball, seed=10 * game + seed)
             ball_speed = np.full(len(ball), np.nan, np.float32)
         if variant == "fixed":

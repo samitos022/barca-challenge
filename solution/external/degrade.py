@@ -14,6 +14,7 @@ BAR-ATH's per-team count histogram (11: 57.6%, 10: 21.7%, 9: 5.5%, <=8: 4.6%, 12
 by running this file. Seeded: the same seed gives the same degraded game.
 """
 
+import os
 import warnings
 
 import numpy as np
@@ -389,3 +390,77 @@ def move_dead_ball(ball, players, gt, seed, dead=2):
             seg[:t1] = np.nan
         out[a:b] = seg
     return out
+
+
+# ---- the tactical camera's framing (12/11) -----------------------------------------------------
+# BAR-ATH's tactical camera never shows the whole pitch (59% in median): the two corner flags on its
+# far side are in the image on 2% of the frames, so at a corner from that side the taker is never
+# tracked, and players out of the image are lost (tactical_clean removes the frozen copies the
+# tracker leaves there). External tracking sees everybody. camera_view() keeps, on every external
+# frame, only what BAR-ATH's camera would show: the homography of a BAR-ATH frame whose players
+# stand in a similar place (players' centroid), chosen among the CAM_K nearest, a new choice every
+# CAM_SEG_S. Positions only, no label: the framing of the camera is a property of the video.
+CAM_BANK = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "data", "derived", "camera_bank.npz")
+CAM_STEP = 5           # BAR-ATH frames between bank samples
+CAM_K = 20
+CAM_SEG_S = 5.0
+
+
+def _camera_bank():
+    if os.path.exists(CAM_BANK):
+        z = np.load(CAM_BANK)
+        return z["H"], z["c"], tuple(z["pitch"])
+    import sys
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for p in (here, os.path.dirname(here)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    import tracking
+    from games import GAME, GAMES, asset_paths, half_video_blocks
+    teams, players, _, _, _ = tracking.load(GAME, "tactical")
+    Hm = np.loadtxt(asset_paths(GAME)["homography"], delimiter=",", skiprows=1,
+                    usecols=range(1, 10)).reshape(-1, 3, 3)
+    idx = np.concatenate([np.arange(a, z + 1, CAM_STEP) for _, a, z in half_video_blocks(GAME)])
+    idx = idx[idx < len(Hm)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        c = np.stack([np.nanmean(players[idx, :, 0], axis=1), np.nanmean(players[idx, :, 1], axis=1)], axis=1)
+    ok = np.isfinite(c).all(axis=1) & np.isfinite(Hm[idx]).all(axis=(1, 2))
+    pitch = np.array(GAMES[GAME]["pitch"], dtype=np.float64)
+    np.savez_compressed(CAM_BANK, H=Hm[idx][ok], c=c[ok] / pitch, pitch=pitch)
+    return Hm[idx][ok], c[ok] / pitch, tuple(pitch)
+
+
+def camera_view(players, ball, pitch, seed):
+    """(players, ball) with what BAR-ATH's tactical camera would not see set to NaN."""
+    from scipy.spatial import cKDTree
+    import sys
+    sol = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if sol not in sys.path:
+        sys.path.insert(0, sol)
+    import track_fixes as tf
+    Hb, cb, _ = _camera_bank()
+    L, W = pitch
+    n = len(players)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        c = np.stack([np.nanmean(players[..., 0], axis=1) / L, np.nanmean(players[..., 1], axis=1) / W], axis=1)
+    ok = np.isfinite(c).all(axis=1)
+    rng = np.random.default_rng(seed)
+    seg = int(CAM_SEG_S * FPS)
+    rank = np.repeat(rng.integers(0, CAM_K, size=n // seg + 1), seg)[:n]
+    j = np.zeros(n, dtype=np.int64)
+    if ok.any():
+        _, nn = cKDTree(cb).query(c[ok], k=CAM_K)
+        j[ok] = nn[np.arange(ok.sum()), rank[ok]]
+    H = Hb[j]
+    p2, b2 = players.copy(), ball.copy()
+    for a in range(0, n, 20000):
+        sl = slice(a, min(n, a + 20000))
+        vis = tf.in_view(H[sl], np.nan_to_num(players[sl, :, 0]), np.nan_to_num(players[sl, :, 1]), pitch)
+        vis &= ok[sl, None]
+        p2[sl][~vis & ok[sl, None]] = np.nan
+        bv = tf.in_view(H[sl], np.nan_to_num(ball[sl, 0])[:, None], np.nan_to_num(ball[sl, 1])[:, None], pitch)[:, 0]
+        b2[sl][~bv & ok[sl]] = np.nan
+    return p2, b2

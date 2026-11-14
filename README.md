@@ -1,5 +1,26 @@
 # Possesso palla frame per frame — More than a Hack 2027
 
+> **All Blacks FC submission (English).** Technical report: [docs/TECHNICAL_REPORT.md](docs/TECHNICAL_REPORT.md).
+> To regenerate the submitted file (`evaluation/results/v2cml3_possession.csv`, SHA-256
+> `eeb2d401cd6b2106d89e8e1896c949572009b55595694b91ec35e732fa64169d`) with Python 3.14 and `ffmpeg`:
+>
+> ```bash
+> python -m venv .venv && .venv/bin/pip install -r requirements-team.txt
+> # data bundle unpacked into data/ (or MTAH_DATA_DIR); external datasets:
+> .venv/bin/python solution/external/idsse.py --download
+> .venv/bin/python solution/external/metrica.py --download
+> .venv/bin/python solution/external/skillcorner.py --download
+> .venv/bin/python solution/external/pff.py --download
+> # pipeline
+> .venv/bin/python solution/team_reassign.py train
+> .venv/bin/python solution/team_reassign.py apply
+> .venv/bin/python solution/possession_ml.py train3          # about 1.5 h
+> .venv/bin/python solution/possession_ml.py predict3 --tracking tactical_clean
+> .venv/bin/python evaluation/validate_submission.py evaluation/results/v2cml3_possession.csv
+> ```
+>
+> The rest of this README (in Italian) describes the rule machine `possession_v2` and our working notes.
+
 Per ogni frame della partita BAR-ATH (199.319 frame, 25 fps) il nostro codice dice **chi ha la
 palla**:
 
@@ -225,4 +246,4 @@ grafici che decidono i cambi. Scrive `data/clips/BAR-ATH_v2_review_public.mp4` e
 - Usare il replay del broadcast come segnale di palla morta.
 - Smart Tagging: le finestre dei tag (~35 s) sono troppo larghe per datare le riprese; va capito
   dove cade la ripresa dentro la finestra prima di usarli per scegliere la squadra.
-- Report tecnico: [docs/TECHNICAL_REPORT_TEMPLATE.md](docs/TECHNICAL_REPORT_TEMPLATE.md).
+- Report tecnico: [docs/TECHNICAL_REPORT.md](docs/TECHNICAL_REPORT.md) (modello: [docs/TECHNICAL_REPORT_TEMPLATE.md](docs/TECHNICAL_REPORT_TEMPLATE.md)).

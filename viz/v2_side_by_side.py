@@ -116,6 +116,11 @@ def main():
     ap.add_argument("--last", type=int, default=ms.GT_LAST)
     ap.add_argument("--out", default="BAR-ATH_v2_gt_public.mp4")
     ap.add_argument("--tracking", choices=tuple(v2.STEMS), default="tactical")
+    ap.add_argument("--strips", default="",
+                    help='extra label strips "Name=path.csv;Name=path.csv" (replace the learnt-model strip)')
+    ap.add_argument("--models-only", action="store_true",
+                    help="no v2: strips = ground truth + --strips, charts and panel = the learnt model's P(H) / P(A) / P(D)")
+    ap.add_argument("--probs", default="data/derived/v2cml3_probs.npz", help="--models-only: the model's probabilities")
     ap.add_argument("--panel", choices=("auto", "dead"), default="auto",
                     help="auto: the threshold closest to firing; dead: always every dead-ball parameter")
     args = ap.parse_args()
@@ -175,6 +180,18 @@ def main():
     ml_path = csv_path.replace("_possession", "ml3_possession")
     lab_ml = ms.read_csv_labels(ml_path) if os.path.exists(ml_path) else None
     ml_img = ms.long_strips(gt_labels, is_gt, lab_ml, [], 1, None)[1] if lab_ml is not None else None
+    extra = []
+    for item in filter(None, args.strips.split(";")):
+        nm, _, pth = item.partition("=")
+        pth = pth if os.path.isabs(pth) else os.path.join(ROOT, pth)
+        lab_x = ms.read_csv_labels(pth)
+        extra.append((nm.strip(), ms.long_strips(gt_labels, is_gt, lab_x, [], 1, None)[1], lab_x))
+    p_model = None
+    if args.models_only:
+        pp = args.probs if os.path.isabs(args.probs) else os.path.join(ROOT, args.probs)
+        p_model = np.load(pp)["p3"]
+        model_chart = page_chart([(p_model[:, 0] * 1.25, TEAM_LINE[0]), (p_model[:, 1] * 1.25, TEAM_LINE[1]),
+                                  (p_model[:, 2] * 1.25, DEAD_LINE)], [])
     in_play = (live == 0) | (live == 1)
     chart_img = page_chart([(score[0] / thr, TEAM_LINE[0]), (score[1] / thr, TEAM_LINE[1]),
                             (np.where(in_play, dead_score / thr_dead, 0), DEAD_LINE),
@@ -563,14 +580,18 @@ def main():
 
         c = ImageDraw.Draw(canvas)
         # ---- label and state -------------------------------------------------------------
-        lab = lab_v2[f]
+        lab = lab_v2[f] if not (args.models_only and extra) else extra[-1][2][f]
         c.rectangle([30, y0 + 14, 290, y0 + 100], fill=gt.LABEL_COLOR.get(lab, (40, 40, 40)))
         c.text((160, y0 + 57), lab, font=font_big, fill=(255, 255, 255), anchor="mm")
-        c.text((160, y0 + 108), "V2 (retrodatata)", font=font_small, fill=TEXT, anchor="mt")
-        line = "v2: " + state_of.get(lab, lab)
+        c.text((160, y0 + 108), extra[-1][0] if (args.models_only and extra) else "V2 (retrodatata)", font=font_small,
+               fill=TEXT, anchor="mt")
+        line = "" if args.models_only else "v2: " + state_of.get(lab, lab)
         if is_gt[f]:
             line += "   ·   GT: {}".format(gt_labels[f])
-        if lab_ml is not None:
+        if extra:
+            line += "".join("   ·   {}: {}".format(nm, lab_x[f]) for nm, _, lab_x in extra)
+            line = line.lstrip(" ·")
+        elif lab_ml is not None:
             line += "   ·   modello: {}".format(lab_ml[f])
         c.text((TL_X, y0 + 18), line, font=font_mid, fill=TEXT)
         secs = f / 25
@@ -580,17 +601,26 @@ def main():
         # ---- strips and page chart -------------------------------------------------------
         page_start = ORIGIN + ((f - ORIGIN) // PAGE) * PAGE
         x0 = int((page_start - ORIGIN) * PX)
-        strips = [("Ground truth", gt_img),
-                  ({"fused": "v2 fuso", "tactical_clean": "v2 squadre riass."}.get(args.tracking, "v2 (nostro)"), v2_img)]
-        if ml_img is not None:
+        strips = [("Ground truth", gt_img)]
+        if not args.models_only:
+            strips.append(({"fused": "v2 fuso", "tactical_clean": "v2 squadre riass."}.get(args.tracking, "v2 (nostro)"), v2_img))
+        if extra:
+            strips += [(nm, img) for nm, img, _ in extra]
+        elif ml_img is not None:
             strips.append(("Modello appreso", ml_img))
+        gap = 26 if len(strips) <= 3 else 20     # four strips still end above the score chart
         for k, (name, img) in enumerate(strips):
-            c.text((30, y0 + 136 + 26 * k), name, font=font_small, fill=(170, 175, 185))
-            canvas.paste(img.crop((x0, 0, x0 + TL_W, 16)), (TL_X, y0 + 140 + 26 * k))
-        c.text((30, y0 + 222), "Punteggi", font=font_small, fill=(170, 175, 185))
-        c.text((30, y0 + 246), "soglia = linea gialla", font=font_tag, fill=DIM)
-        c.text((30, y0 + 266), "bianco palla morta, verde ripresa", font=font_tag, fill=DIM)
-        canvas.paste(chart_img.crop((x0, 0, x0 + TL_W, CHART_H)), (TL_X, y0 + 222))
+            c.text((30, y0 + 136 + gap * k), name, font=font_small, fill=(170, 175, 185))
+            canvas.paste(img.crop((x0, 0, x0 + TL_W, 16)), (TL_X, y0 + 140 + gap * k))
+        if args.models_only:
+            c.text((30, y0 + 222), "Probabilità", font=font_small, fill=(170, 175, 185))
+            c.text((30, y0 + 246), "modello appreso", font=font_tag, fill=DIM)
+            c.text((30, y0 + 266), "squadre a colori, bianco palla morta", font=font_tag, fill=DIM)
+        else:
+            c.text((30, y0 + 222), "Punteggi", font=font_small, fill=(170, 175, 185))
+            c.text((30, y0 + 246), "soglia = linea gialla", font=font_tag, fill=DIM)
+            c.text((30, y0 + 266), "bianco palla morta, verde ripresa", font=font_tag, fill=DIM)
+        canvas.paste((model_chart if args.models_only else chart_img).crop((x0, 0, x0 + TL_W, CHART_H)), (TL_X, y0 + 222))
         ps, pe = max(0, page_start) / 25, min(N_VIDEO, page_start + PAGE) / 25
         c.text((TL_X + TL_W, y0 + 108), "pagina {:d}:{:02d} - {:d}:{:02d}".format(
             int(ps // 60), int(ps % 60), int(pe // 60), int(pe % 60)), font=font_tag,
@@ -608,6 +638,39 @@ def main():
         def ys(vals, vmax):
             return zy + ZOOM_H - 4 - np.clip(vals / vmax, 0, 1) * (ZOOM_H - 30)
 
+        if args.models_only:
+            sp = np.nan_to_num(speed[fr], nan=-1)
+            pts_sp = [(x_, y_) for x_, y_, v_ in zip(xs, ys(sp, 25.0), sp) if v_ >= 0]
+            if len(pts_sp) > 1:
+                c.point(pts_sp, fill=(120, 125, 135))
+            for j, colour in ((0, TEAM_LINE[0]), (1, TEAM_LINE[1]), (2, DEAD_LINE)):
+                c.line(list(zip(xs, ys(p_model[fr, j], 1.0))), fill=colour, width=2)
+            for ei, (nm, _, lab_x) in enumerate(extra):
+                seg = lab_x[fr]
+                for i_ in np.flatnonzero(seg[1:] != seg[:-1]) + 1:
+                    sx = xs[i_]
+                    col = gt.LABEL_COLOR.get(seg[i_], (200, 200, 200))
+                    y_a = zy + ZOOM_H - 30 + 15 * ei
+                    c.line([sx, y_a, sx, y_a + 14], fill=col, width=3)
+            for tf in touch_frames[np.searchsorted(touch_frames, lo):np.searchsorted(touch_frames, hi + 1)]:
+                tx = ZOOM_X + (tf - lo) / (2 * zoom_frames) * ZOOM_W
+                team = touch_team[tf]
+                col = TEAM_LINE[team] if team >= 0 else (160, 160, 160)
+                c.polygon([(tx, zy + 4), (tx - 5, zy + 14), (tx + 5, zy + 14)], fill=col)
+            c.line([ZOOM_X + ZOOM_W / 2, zy, ZOOM_X + ZOOM_W / 2, zy + ZOOM_H], fill=(255, 255, 255), width=1)
+            c.text((ZOOM_X + 6, zy + ZOOM_H + 4), "-5 s   P(casa), P(ospiti), P(palla morta) del modello · velocità palla "
+                   "(grigio) · ▲ tocchi · in basso: cambi di stato delle barre   +5 s", font=font_tag, fill=DIM)
+            y = zy
+            c.text((INFO_X, y), "Modello:  casa {:.2f}   ospiti {:.2f}   palla morta {:.2f}".format(*p_model[f]),
+                   font=font_row, fill=TEXT)
+            y += 22
+            for nm, _, lab_x in extra:
+                c.text((INFO_X, y), "{}: {}".format(nm, state_of.get(lab_x[f], lab_x[f])), font=font_row,
+                       fill=gt.LABEL_COLOR.get(lab_x[f], TEXT))
+                y += 22
+            writer.stdin.write(canvas.tobytes())
+            written += 1
+            continue
         y_thr = ys(np.array([1.0]), 1.25)[0]
         for xx in range(ZOOM_X, ZOOM_X + ZOOM_W, 8):
             c.line([xx, y_thr, xx + 4, y_thr], fill=ACCENT)

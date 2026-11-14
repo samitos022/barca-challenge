@@ -423,7 +423,18 @@ def features3(teams, players, ball, ball_speed, blocks, pitch, codes, f, r):
         next_e = np.minimum.accumulate(np.where(mask, idx, 10 ** 9)[::-1])[::-1]
         add("since_{}_s".format(name), np.clip((idx - last_e) / FPS, 0, 30))
         add("until_{}_s".format(name), np.clip((next_e - idx) / FPS, 0, 30))
-    return np.concatenate([X1, np.stack(cols, 1)], axis=1), names + extra
+    # --- third set (12/11): the ball gap seen from each keeper (keeper_signals), so that a ball
+    # lost in the keeper's hands is not taken for a stoppage. Out of fold (spell_lab "kpfeat"):
+    # hold frames called dead 12% -> 4% on SkillCorner and PFF, spellF1 unchanged on the mean.
+    import keeper_signals
+    K, kn = keeper_signals.features(teams, players, ball, blocks, pitch)
+    # --- fourth set (13/11): set pieces read from the players alone (setpiece_signals: corner,
+    # penalty, throw-in, wall, crowded box) and which team will restart, for the stoppages whose
+    # ball is not tracked. Out of fold together with the "view" training condition (spell_lab
+    # "kpspv"): mean spellF1 0.704 -> 0.705 realistic, 0.693 -> 0.699 on camera-framed tracking.
+    import setpiece_signals
+    S, sn = setpiece_signals.features(teams, players, ball, blocks, pitch)
+    return np.concatenate([X1, np.stack(cols, 1), K, S], axis=1), names + extra + kn + sn
 
 
 N_FEATURES_V1 = 82      # the columns of the first three-state model (10/11): features3()[:, :82]
@@ -556,28 +567,29 @@ def _rows3(d):
     return d[1][m], gt[m].astype(np.int8)
 
 
-TRAIN3 = (("realistic", 1), ("keeper", 2), ("moved", 3))   # (condition, seed) of the training runs
+TRAIN3 = (("realistic", 1), ("keeper", 2), ("moved", 3), ("view", 2))   # (condition, seed) of the training runs
+# "view" (13/11): only what BAR-ATH's tactical camera would show (calibrate.case, degrade.camera_view)
 MIN_PLAYERS3 = 10      # tracked players a frame needs to be a training row
 
 
 def _jobs3(conds):
     """Every match in each condition. SkillCorner (broadcast tracking, used as it is) only under
-    "realistic"; the keeper condition is IDSSE's only."""
+    "realistic", "keeper" (its own ball with the keeper holds removed) and "view". Before 12/11 the keeper
+    condition was IDSSE's only."""
     import idsse
     import metrica
     import skillcorner
     jobs = []
     for cond, seed in conds:
         jobs += [((g, seed), "tracab", cond) for g in idsse.GAMES]
-        if cond != "keeper":
-            jobs += [((g, seed), None, cond) for g in metrica.GAMES]
-        if cond == "realistic":
+        jobs += [((g, seed), None, cond) for g in metrica.GAMES]
+        if cond in ("realistic", "keeper", "view"):
             jobs += [((g, seed), None, cond) for g in skillcorner.GAMES]
     return jobs
 
 
 PFF_STRIDE = 15        # training rows of a PFF match: one frame in 15 (59 matches weigh like about 20)
-PFF_CONDS = ("realistic", "moved")
+PFF_CONDS = ("realistic", "moved", "keeper", "view")
 
 
 def _pff_jobs(skip=(), stride=PFF_STRIDE):
@@ -673,7 +685,7 @@ def cv3(folds=5, costs=((16, 32),), every=10, workers=5, pff_test=10, pff_stride
 
 def train3(workers=5):
     """Final model: every match in each condition of TRAIN3, plus the PFF World Cup matches
-    (one frame in PFF_STRIDE, realistic and moved)."""
+    (one frame in PFF_STRIDE, in each condition of PFF_CONDS)."""
     from multiprocessing import Pool
     with Pool(workers) as pool:
         data = pool.map(_game_job3, _jobs3(TRAIN3))
@@ -688,8 +700,8 @@ def train3(workers=5):
         len(data), len(rows_pff), sum(len(x) for x in Xs), os.path.relpath(MODEL3, ROOT)))
 
 
-def predict3(teams, players, ball, bs, blocks, pitch, events=(), level=None, cut=None, model=None):
-    """(codes H/A/D/X of the three-state model, v2's codes) on any tracking."""
+def predict3(teams, players, ball, bs, blocks, pitch, events=(), level=None, cut=None, model=None, return_p3=False):
+    """(codes H/A/D/X of the three-state model, v2's codes[, P(H), P(A), P(D)]) on any tracking."""
     import possession_metrics as pm
     if model is None:
         with open(MODEL3, "rb") as fh:
@@ -698,11 +710,14 @@ def predict3(teams, players, ball, bs, blocks, pitch, events=(), level=None, cut
     codes = pm.label_codes(lab)
     X3, names = features3(teams, players, ball, bs, blocks, pitch, codes, f, r)
     assert names == model["names"]
-    return decode3(prob3(model["clf"], X3, names), blocks, model["cost_team"], model["cost_dead"]), codes
+    p3 = prob3(model["clf"], X3, names)
+    out = decode3(p3, blocks, model["cost_team"], model["cost_dead"])
+    return (out, codes, p3) if return_p3 else (out, codes)
 
 
 def predict3_bar_ath(source="tactical", use_whistle=True):
-    """BAR-ATH with the three-state model. Writes <stem>ml3_possession.csv."""
+    """BAR-ATH with the three-state model. Writes <stem>ml3_possession.csv and the model's
+    probabilities to data/derived/<stem>ml3_probs.npz (for the review video)."""
     import sync_broadcast
     import tracking
     import whistle
@@ -715,7 +730,8 @@ def predict3_bar_ath(source="tactical", use_whistle=True):
     if source == "fused":
         sync = np.load(sync_broadcast.OUT)
         cut = (sync["b_of_t"] >= 0) & (sync["b_live"] < 0)
-    out, codes = predict3(teams, players, ball, bs, blocks, GAMES[GAME]["pitch"], events, level, cut)
+    out, codes, p3 = predict3(teams, players, ball, bs, blocks, GAMES[GAME]["pitch"], events, level, cut, return_p3=True)
+    np.savez_compressed(os.path.join(ROOT, "data", "derived", "{}ml3_probs.npz".format(v2.STEMS[source])), p3=p3.astype(np.float32))
     labels = np.array(["H", "A", "D", "X"])[out]
     path = os.path.join(ROOT, "evaluation", "results", "{}ml3_possession{}.csv".format(
         v2.STEMS[source], "" if use_whistle else "_nowhistle"))
